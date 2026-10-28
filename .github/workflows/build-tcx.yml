@@ -325,10 +325,31 @@ jobs:
           rm -rf output/static
           mkdir -p output/static/scalar
           cp -r landscape-webui/dist/. output/static/
-          cp node_modules/@scalar/api-reference/dist/browser/standalone.js output/static/scalar/
-          cp node_modules/@scalar/api-reference/dist/style.css output/static/scalar/
+
+          # pnpm does NOT hoist @scalar/api-reference to the workspace root
+          # node_modules; it lives in landscape-webui/node_modules (symlinked
+          # into the pnpm store). Resolve it through the package symlink.
+          SCALAR_PKG="$(readlink -f landscape-webui/node_modules/@scalar/api-reference 2>/dev/null || true)"
+          if [ -z "${SCALAR_PKG}" ] || [ ! -d "${SCALAR_PKG}/dist" ]; then
+            echo "::warning::@scalar/api-reference not found; API reference assets skipped (main UI is unaffected)"
+          else
+            SCALAR_JS="$(find "${SCALAR_PKG}/dist" -maxdepth 3 -name 'standalone.js' | head -n 1 || true)"
+            SCALAR_CSS="$(find "${SCALAR_PKG}/dist" -maxdepth 2 -name 'style.css' | head -n 1 || true)"
+            if [ -n "${SCALAR_JS}" ]; then
+              cp "${SCALAR_JS}" output/static/scalar/standalone.js
+            else
+              echo "::warning::scalar standalone.js not found under ${SCALAR_PKG}/dist"
+            fi
+            if [ -n "${SCALAR_CSS}" ]; then
+              cp "${SCALAR_CSS}" output/static/scalar/style.css
+            else
+              echo "::warning::scalar style.css not found under ${SCALAR_PKG}/dist"
+            fi
+          fi
+
           ( cd output && zip -qr ../landscape-webui-static.zip static )
           ls -lh landscape-webui-static.zip
+          find output/static -maxdepth 2 -type f | head -n 20
 
       - name: Upload webui static
         uses: actions/upload-artifact@v7
