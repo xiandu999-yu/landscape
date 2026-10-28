@@ -6,6 +6,7 @@ export interface NatOptions {
   tcp_syn_timeout_secs: number;
   tcp_timeout_secs: number;
   udp_timeout_secs: number;
+  icmp_timeout_secs: number;
 }
 
 const natApi = applyInterceptors(

@@ -3,8 +3,12 @@
 //! Stored as `$HOME/.landscape-router/nat-options.json` so the WebUI can edit
 //! it. Environment variables still win, for scripted setups.
 //!
+//! Defaults follow einat's NAT timers (tcp_trans=2m, tcp_est=24h,
+//! udp_default=10m, icmp=1m) so a migrated setup keeps the same behavior.
+//!
 //! ```json
-//! { "full_cone": true, "tcp_syn_timeout_secs": 6, "tcp_timeout_secs": 600, "udp_timeout_secs": 300 }
+//! { "full_cone": true, "tcp_syn_timeout_secs": 120, "tcp_timeout_secs": 86400,
+//!   "udp_timeout_secs": 600, "icmp_timeout_secs": 60 }
 //! ```
 
 use std::path::PathBuf;
@@ -16,18 +20,24 @@ const NS: u64 = 1_000_000_000;
 pub struct NatOptions {
     /// Endpoint-independent filtering (full cone) for dynamic mappings.
     pub full_cone: bool,
+    /// TCP half-open (SYN, or not fully established) timeout.
     pub tcp_syn_timeout_ns: u64,
+    /// TCP established idle timeout.
     pub tcp_timeout_ns: u64,
+    /// UDP idle timeout.
     pub udp_timeout_ns: u64,
+    /// ICMP idle timeout.
+    pub icmp_timeout_ns: u64,
 }
 
 impl Default for NatOptions {
     fn default() -> Self {
         Self {
             full_cone: true,
-            tcp_syn_timeout_ns: 6 * NS,
-            tcp_timeout_ns: 600 * NS,
-            udp_timeout_ns: 300 * NS,
+            tcp_syn_timeout_ns: 120 * NS,
+            tcp_timeout_ns: 24 * 3600 * NS,
+            udp_timeout_ns: 600 * NS,
+            icmp_timeout_ns: 60 * NS,
         }
     }
 }
@@ -73,6 +83,7 @@ impl NatOptions {
                             ("tcp_syn_timeout_secs", &mut opts.tcp_syn_timeout_ns),
                             ("tcp_timeout_secs", &mut opts.tcp_timeout_ns),
                             ("udp_timeout_secs", &mut opts.udp_timeout_ns),
+                            ("icmp_timeout_secs", &mut opts.icmp_timeout_ns),
                         ] {
                             if let Some(v) = doc.get(key).and_then(|v| v.as_u64()) {
                                 *dst = secs(v, *dst);
@@ -97,6 +108,9 @@ impl NatOptions {
         opts.udp_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_UDP_TIMEOUT_SECS", opts.udp_timeout_ns / NS),
                  opts.udp_timeout_ns);
+        opts.icmp_timeout_ns =
+            secs(env_u64("LANDSCAPE_NAT_ICMP_TIMEOUT_SECS", opts.icmp_timeout_ns / NS),
+                 opts.icmp_timeout_ns);
 
         opts
     }

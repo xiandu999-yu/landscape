@@ -201,7 +201,7 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 |---|---|
 | **P0**：`nat_metric_events` ringbuf 满/无消费者（metric=off、DB 写慢）时，`napt_metric_try_report()` 失败会让 CT 状态机 `return RESTART`，永远停在 ACTIVE → 不超时、端口不回收、`napt_ct` 涨满后新连接静默丢 | 上报改为“尽力而为”：失败不再阻塞状态推进 |
 | 端口分配可预测（队列按 1024…65535 顺序 pop，外部端口基本递增） | 启动时用 xorshift+时间/PID 种子打乱端口入队顺序（Fisher-Yates） |
-| CT 超时写死 6s / 10min / 5min | 改为 rodata 可调，默认值不变 |
+| CT 超时写死 6s / 10min / 5min | 改为 rodata 可调，默认值对齐 einat（见下表） |
 | Full cone 依赖流控 `allow_reuse_port` 标记，默认是 EDF | 新增 **WebUI 开关**（NAT 服务弹窗），默认开启 EIM+EIF（full cone） |
 
 ### Full Cone / 超时 开关在哪里
@@ -212,12 +212,27 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 TCP 端口段
 UDP 端口段
 ICMP ID 段
-TCP 半开超时 (秒)      [ 6 ]
-TCP 空闲超时 (秒)      [ 600 ]
-UDP/ICMP 超时 (秒)     [ 300 ]
+TCP 半开超时 (秒)      [ 120 ]
+TCP 空闲超时 (秒)      [ 86400 ]
+UDP 超时 (秒)          [ 600 ]
+ICMP 超时 (秒)         [ 60 ]
 Full Cone (EIM/EIF)   [开关]     ← 默认开
 [更新]
 ```
+
+默认值对齐 einat 的 NAT 计时器：
+
+| Landscape 字段 | einat 配置 | 默认 |
+|---|---|---|
+| TCP 半开超时 | `timeout_tcp_trans = "2m"` | 120s |
+| TCP 空闲超时 | `timeout_tcp_est = "24h"` | 86400s |
+| UDP 超时 | `timeout_udp_default = "10m"` | 600s |
+| ICMP 超时 | `timeout_icmp_default = "1m"` | 60s |
+
+两个 einat 项在 Landscape 里没有直接对应：
+
+- `timeout_fragment = "5s"`：Landscape 的 nat_v4 CT 只跟踪 TCP/UDP/ICMP，没有分片条目；
+- `timeout_udp_min = "2m"`：Landscape 是单一 UDP 超时，没有 einat 那种 per-flow 的 min/established 两段式。
 
 保存时前端会先 `PUT /api/v1/system/nat/options` 写 `$HOME/.landscape-router/nat-options.json`，
 再保存 WAN link；`landscape_ebpf::nat_options::reload()` 刷新缓存，下次 NAT attach 时生效。
@@ -227,17 +242,19 @@ API：
 ```
 GET /api/v1/system/nat/options
 PUT /api/v1/system/nat/options
-   { "full_cone": true, "tcp_syn_timeout_secs": 6,
-     "tcp_timeout_secs": 600, "udp_timeout_secs": 300 }
+   { "full_cone": true, "tcp_syn_timeout_secs": 120,
+     "tcp_timeout_secs": 86400, "udp_timeout_secs": 600,
+     "icmp_timeout_secs": 60 }
 ```
 
 环境变量（优先级高于 JSON，方便脚本/调试）：
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS` | `6` | TCP 半开超时 |
-| `LANDSCAPE_NAT_TCP_TIMEOUT_SECS` | `600` | TCP 已建立空闲超时 |
-| `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `300` | UDP/ICMP 超时（QUIC/游戏建议 120 或更短） |
+| `LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS` | `120` | TCP 半开超时 |
+| `LANDSCAPE_NAT_TCP_TIMEOUT_SECS` | `86400` | TCP 已建立空闲超时 |
+| `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `600` | UDP 超时（QUIC/游戏建议 120 或更短） |
+| `LANDSCAPE_NAT_ICMP_TIMEOUT_SECS` | `60` | ICMP 超时 |
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
 
 注意：
@@ -245,6 +262,9 @@ PUT /api/v1/system/nat/options
 - 超时/ full cone 的 rodata 在 **NAT 段 attach 时**写入（`stages/nat4.rs`），改了要重启 **WAN 链路服务**（或整个 Landscape）；
 - XDP NAT 路径复用 TC 的 conntrack，但超时/ full cone 的 rodata 只对 TC 数据面设置，XDP 路径仍用 C 默认值（当前 `xdp:` 为空，不影响）；
 - 以上改动只针对 **IPv4 NAT**；NAT6 的对应优化未包含。
+- **TCP 空闲 24h 的代价**：每个 ACTIVE CT 仍按 5s 周期跑一次 `bpf_timer`（指标上报），
+  CT 存活越久、同时在线的条目越多，timer 唤醒就越多。R6S 家宽一般够用；若发现
+  `ksoftirqd`/CPU 偏高，把 TCP 空闲降到 1800~3600 即可。
 
 ## 已知限制 / 下一步
 

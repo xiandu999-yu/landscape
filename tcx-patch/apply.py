@@ -178,7 +178,8 @@ def main() -> None:
         "     * RELEASE and external ports are never recycled. */\n"
         "    (void)napt_metric_try_report(key, value, NAPT_METRIC_ACTIVE);\n",
     )
-    #    6b) timeouts become rodata-driven (userspace-tunable, defaults kept).
+    #    6b) timeouts become rodata-driven, defaulting to einat's NAT timers:
+    #        tcp_trans=2m, tcp_est=24h, udp_default=10m, icmp=1m.
     patch(
         nat_timer,
         "#define NAPT_TCP_SYN_TIMEOUT_NS (6ULL * NAPT_NSEC_PER_SEC)\n"
@@ -187,18 +188,29 @@ def main() -> None:
         "/* Timeouts come from rodata so userspace can tune them. */\n"
         "#define NAPT_TCP_SYN_TIMEOUT_NS land_nat_tcp_syn_timeout_ns\n"
         "#define NAPT_TCP_TIMEOUT_NS land_nat_tcp_timeout_ns\n"
-        "#define NAPT_UDP_TIMEOUT_NS land_nat_udp_timeout_ns\n",
+        "#define NAPT_UDP_TIMEOUT_NS land_nat_udp_timeout_ns\n"
+        "#define NAPT_ICMP_TIMEOUT_NS land_nat_icmp_timeout_ns\n",
+    )
+    #        ICMP gets its own timeout (was sharing the UDP one).
+    patch(
+        nat_timer,
+        "    if (key->proto == IPV4_PROTO_UDP) return NAPT_UDP_TIMEOUT_NS;\n\n"
+        "    if (key->proto == IPV4_PROTO_TCP) {\n",
+        "    if (key->proto == IPV4_PROTO_UDP) return NAPT_UDP_TIMEOUT_NS;\n"
+        "    if (key->proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n\n"
+        "    if (key->proto == IPV4_PROTO_TCP) {\n",
     )
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(
         nat_rodata,
         "const volatile __u16 land_nat_tcp_range_end = 0;\n",
         "const volatile __u16 land_nat_tcp_range_end = 0;\n\n"
-        "/* CT timeouts in nanoseconds (set from userspace; defaults match the\n"
-        " * historical hardcoded 6s / 10min / 5min). */\n"
-        "const volatile __u64 land_nat_tcp_syn_timeout_ns = 6000000000ULL;\n"
-        "const volatile __u64 land_nat_tcp_timeout_ns = 600000000000ULL;\n"
-        "const volatile __u64 land_nat_udp_timeout_ns = 300000000000ULL;\n\n"
+        "/* CT timeouts in nanoseconds (set from userspace). Defaults mirror\n"
+        " * einat: tcp_trans=2m, tcp_est=24h, udp=10m, icmp=1m. */\n"
+        "const volatile __u64 land_nat_tcp_syn_timeout_ns = 120000000000ULL;\n"
+        "const volatile __u64 land_nat_tcp_timeout_ns = 86400000000000ULL;\n"
+        "const volatile __u64 land_nat_udp_timeout_ns = 600000000000ULL;\n"
+        "const volatile __u64 land_nat_icmp_timeout_ns = 60000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 1;\n",
     )
@@ -255,6 +267,7 @@ def main() -> None:
         "        rodata.land_nat_tcp_syn_timeout_ns = nat_opts.tcp_syn_timeout_ns;\n"
         "        rodata.land_nat_tcp_timeout_ns = nat_opts.tcp_timeout_ns;\n"
         "        rodata.land_nat_udp_timeout_ns = nat_opts.udp_timeout_ns;\n"
+        "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n",
     )
 
@@ -301,9 +314,10 @@ def main() -> None:
         "const link = ref<WanLink>(default_ethernet_link(iface_info.iface_name));\n"
         "const nat_options = ref<NatOptions>({\n"
         "  full_cone: true,\n"
-        "  tcp_syn_timeout_secs: 6,\n"
-        "  tcp_timeout_secs: 600,\n"
-        "  udp_timeout_secs: 300,\n"
+        "  tcp_syn_timeout_secs: 120,\n"
+        "  tcp_timeout_secs: 86400,\n"
+        "  udp_timeout_secs: 600,\n"
+        "  icmp_timeout_secs: 60,\n"
         "});\n",
     )
     patch(
@@ -348,9 +362,17 @@ def main() -> None:
         '          style="width: 160px"\n'
         '        />\n'
         '      </n-form-item>\n'
-        '      <n-form-item label="UDP/ICMP 超时 (秒)">\n'
+        '      <n-form-item label="UDP 超时 (秒)">\n'
         '        <n-input-number\n'
         '          v-model:value="nat_options.udp_timeout_secs"\n'
+        '          :min="1"\n'
+        '          :max="86400"\n'
+        '          style="width: 160px"\n'
+        '        />\n'
+        '      </n-form-item>\n'
+        '      <n-form-item label="ICMP 超时 (秒)">\n'
+        '        <n-input-number\n'
+        '          v-model:value="nat_options.icmp_timeout_secs"\n'
         '          :min="1"\n'
         '          :max="86400"\n'
         '          style="width: 160px"\n'
