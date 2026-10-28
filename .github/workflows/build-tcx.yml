@@ -183,14 +183,29 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install zig and cargo-zigbuild
+        env:
+          ZIG_VERSION: "0.16.0"
         run: |
           set -euo pipefail
-          # Ubuntu 24.04 marks pip as externally managed (PEP 668); --user alone
-          # is rejected, so fall back to --break-system-packages on the runner.
-          python3 -m pip install --user 'ziglang==0.16.0' ||
-            python3 -m pip install --user --break-system-packages 'ziglang==0.16.0'
-          echo "$HOME/.local/bin" >> "${GITHUB_PATH}"
+
+          # IMPORTANT: the PyPI `ziglang` wheel does NOT install a `zig` entry
+          # point on PATH — the compiler is bundled at site-packages/ziglang/zig
+          # (that is why `zig version` returned 127 after a successful install).
+          python3 -m pip install --user "ziglang==${ZIG_VERSION}" ||
+            python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
           export PATH="$HOME/.local/bin:${PATH}"
+
+          ZIG_BIN="$(python3 -c 'import os, ziglang; p = os.path.join(os.path.dirname(ziglang.__file__), "zig"); print(p if os.path.isfile(p) else "")')"
+          if [ -n "${ZIG_BIN}" ]; then
+            echo "zig binary: ${ZIG_BIN}"
+            sudo ln -sf "${ZIG_BIN}" /usr/local/bin/zig
+          else
+            echo "no bundled zig binary; installing python -m ziglang wrapper"
+            printf '#!/usr/bin/env bash\nexec python3 -m ziglang "$@"\n' | sudo tee /usr/local/bin/zig >/dev/null
+            sudo chmod +x /usr/local/bin/zig
+          fi
+
+          command -v zig
           zig version
           cargo install --locked cargo-zigbuild
           cargo zigbuild --version
