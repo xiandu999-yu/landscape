@@ -241,6 +241,23 @@ def main() -> None:
         "    if (key->proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n\n"
         "    if (key->proto == IPV4_PROTO_TCP) {\n",
     )
+    #        TCP: only a fully established flow (both directions carried data)
+    #        keeps the long idle timeout; SYN/FIN/RST are transitory.
+    patch(
+        nat_timer,
+        "    if (key->proto == IPV4_PROTO_TCP) {\n"
+        "        if (value->client_status == NAPT_TCP_STATE_SYN &&\n"
+        "            value->server_status == NAPT_TCP_STATE_SYN)\n"
+        "            return NAPT_TCP_TIMEOUT_NS;\n"
+        "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
+        "    }\n",
+        "    if (key->proto == IPV4_PROTO_TCP) {\n"
+        "        if (value->client_status == NAPT_TCP_STATE_LESS_EST &&\n"
+        "            value->server_status == NAPT_TCP_STATE_LESS_EST)\n"
+        "            return NAPT_TCP_TIMEOUT_NS;\n"
+        "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
+        "    }\n",
+    )
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(
         nat_rodata,
@@ -314,7 +331,12 @@ def main() -> None:
         "        rodata.land_nat_udp_min_timeout_ns = nat_opts.udp_min_timeout_ns;\n"
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
-        "        rodata.land_nat_port_preserve = if nat_opts.port_preserve { 1 } else { 0 };\n",
+        "        rodata.land_nat_port_preserve = if nat_opts.port_preserve { 1 } else { 0 };\n"
+        "        tracing::info!(\n"
+        "            full_cone = nat_opts.full_cone,\n"
+        "            port_preserve = nat_opts.port_preserve,\n"
+        "            \"nat4 runtime options\"\n"
+        "        );\n",
     )
 
     # 7) NAT options plumbing (full cone switch in the NAT modal).
@@ -365,6 +387,7 @@ def main() -> None:
         "  udp_min_timeout_secs: 120,\n"
         "  udp_timeout_secs: 600,\n"
         "  icmp_timeout_secs: 60,\n"
+        "  port_preserve: false,\n"
         "});\n",
     )
     patch(
@@ -393,52 +416,46 @@ def main() -> None:
         '      <n-form-item :label="t(\'nat.service_edit.icmp_id_range\')">\n'
         '        <Range v-model:range="link.nat.icmp_in_range"> </Range>\n'
         '      </n-form-item>\n'
-        '      <n-form-item label="TCP 半开超时 (秒)">\n'
-        '        <n-input-number\n'
-        '          v-model:value="nat_options.tcp_syn_timeout_secs"\n'
-        '          :min="1"\n'
-        '          :max="86400"\n'
-        '          style="width: 160px"\n'
-        '        />\n'
-        '      </n-form-item>\n'
-        '      <n-form-item label="TCP 空闲超时 (秒)">\n'
-        '        <n-input-number\n'
-        '          v-model:value="nat_options.tcp_timeout_secs"\n'
-        '          :min="1"\n'
-        '          :max="86400"\n'
-        '          style="width: 160px"\n'
-        '        />\n'
-        '      </n-form-item>\n'
-        '      <n-form-item label="UDP 半开超时 (秒)">\n'
-        '        <n-input-number\n'
-        '          v-model:value="nat_options.udp_min_timeout_secs"\n'
-        '          :min="1"\n'
-        '          :max="86400"\n'
-        '          style="width: 160px"\n'
-        '        />\n'
-        '      </n-form-item>\n'
-        '      <n-form-item label="UDP 超时 (秒)">\n'
-        '        <n-input-number\n'
-        '          v-model:value="nat_options.udp_timeout_secs"\n'
-        '          :min="1"\n'
-        '          :max="86400"\n'
-        '          style="width: 160px"\n'
-        '        />\n'
-        '      </n-form-item>\n'
-        '      <n-form-item label="ICMP 超时 (秒)">\n'
-        '        <n-input-number\n'
-        '          v-model:value="nat_options.icmp_timeout_secs"\n'
-        '          :min="1"\n'
-        '          :max="86400"\n'
-        '          style="width: 160px"\n'
-        '        />\n'
-        '      </n-form-item>\n'
-        '      <n-form-item label="Full Cone (EIM/EIF)">\n'
-        '        <n-switch\n'
-        '          :value="nat_options.full_cone"\n'
-        '          @update:value="(v: boolean) => (nat_options.full_cone = v)"\n'
-        '        />\n'
-        '      </n-form-item>\n',
+        '      <n-divider style="margin: 8px 0">超时与过滤</n-divider>\n'
+        '      <n-grid :cols="2" :x-gap="12">\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="TCP 半开超时 (秒)">\n'
+        '            <n-input-number v-model:value="nat_options.tcp_syn_timeout_secs" :min="1" :max="86400" style="width: 100%" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="TCP 空闲超时 (秒)">\n'
+        '            <n-input-number v-model:value="nat_options.tcp_timeout_secs" :min="1" :max="86400" style="width: 100%" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="UDP 半开超时 (秒)">\n'
+        '            <n-input-number v-model:value="nat_options.udp_min_timeout_secs" :min="1" :max="86400" style="width: 100%" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="UDP 超时 (秒)">\n'
+        '            <n-input-number v-model:value="nat_options.udp_timeout_secs" :min="1" :max="86400" style="width: 100%" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="ICMP 超时 (秒)">\n'
+        '            <n-input-number v-model:value="nat_options.icmp_timeout_secs" :min="1" :max="86400" style="width: 100%" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '      </n-grid>\n'
+        '      <n-grid :cols="2" :x-gap="12">\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="Full Cone (EIM/EIF)">\n'
+        '            <n-switch :value="nat_options.full_cone" @update:value="(v: boolean) => (nat_options.full_cone = v)" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="端口保持 (Port Preserve)">\n'
+        '            <n-switch :value="nat_options.port_preserve === true" @update:value="(v: boolean) => (nat_options.port_preserve = v)" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '      </n-grid>\n',
     )
 
     # 8) NAT4 port preservation (opt-in via LANDSCAPE_NAT_PORT_PRESERVE=1).

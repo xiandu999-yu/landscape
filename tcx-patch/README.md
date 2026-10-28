@@ -236,6 +236,12 @@ Full Cone (EIM/EIF)   [开关]     ← 默认开
 未见回包 → `UDP_MIN`（120s），见过回包 → `UDP`（600s）。与 einat 的
 `INIT_OUT/INIT_IN -> ESTABLISHED` 两段式等价。
 
+TCP 侧同理：只有 `client_status` 和 `server_status` 都是 `LESS_EST`（双向都传过数据）
+才用长超时；SYN、FIN、RST 这些过渡状态一律用 `TCP 半开超时`（120s），避免
+半开/已关闭连接占用 24h。
+
+UI 上超时字段用两列 `n-grid` 排布（每行两个），比原来五列竖排省一半高度。
+
 einat 的 `timeout_fragment = "5s"` 没有直接对应：Landscape 只用
 `napt_is_non_initial()` 识别非首片，不做 einat 那样的 frag 端口记忆。
 
@@ -266,7 +272,12 @@ PUT /api/v1/system/nat/options
 
 ### 端口保持（opt-in）
 
-`LANDSCAPE_NAT_PORT_PRESERVE=1` 时，新流先尝试用客户端的原源端口：
+NAT 弹窗里新增 **「端口保持 (Port Preserve)」** 开关（默认关），也可用
+`LANDSCAPE_NAT_PORT_PRESERVE=1` 或 `nat-options.json` 的 `"port_preserve": true` 打开。
+**env 优先级最高**：如果 init 脚本里设了 `LANDSCAPE_NAT_PORT_PRESERVE=1`，UI 上关掉也不会生效，
+要用 UI 就把 env 删掉。
+
+开启后，新流先尝试用客户端的原源端口：
 
 1. 端口必须落在该协议的 `tcp_range` / `udp_range` 内；
 2. 用 `state_ref` 上的 **`0 → 0xFFFFFFFFFFFFFFFF` 64 位 CAS 原子占位**
