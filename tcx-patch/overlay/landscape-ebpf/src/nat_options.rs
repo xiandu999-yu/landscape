@@ -32,6 +32,8 @@ pub struct NatOptions {
     pub icmp_timeout_ns: u64,
     /// Keep the client's original source port when possible (opt-in).
     pub port_preserve: bool,
+    /// CT timer / metric report interval (the state machine tick).
+    pub report_interval_ns: u64,
 }
 
 impl Default for NatOptions {
@@ -44,6 +46,7 @@ impl Default for NatOptions {
             udp_timeout_ns: 600 * NS,
             icmp_timeout_ns: 60 * NS,
             port_preserve: false,
+            report_interval_ns: 30 * NS,
         }
     }
 }
@@ -94,6 +97,7 @@ impl NatOptions {
                             ("udp_min_timeout_secs", &mut opts.udp_min_timeout_ns),
                             ("udp_timeout_secs", &mut opts.udp_timeout_ns),
                             ("icmp_timeout_secs", &mut opts.icmp_timeout_ns),
+                            ("report_interval_secs", &mut opts.report_interval_ns),
                         ] {
                             if let Some(v) = doc.get(key).and_then(|v| v.as_u64()) {
                                 *dst = secs(v, *dst);
@@ -125,6 +129,9 @@ impl NatOptions {
         opts.icmp_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_ICMP_TIMEOUT_SECS", opts.icmp_timeout_ns / NS),
                  opts.icmp_timeout_ns);
+        opts.report_interval_ns =
+            secs(env_u64("LANDSCAPE_NAT_REPORT_INTERVAL_SECS", opts.report_interval_ns / NS),
+                 opts.report_interval_ns);
 
         opts
     }

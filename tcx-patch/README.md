@@ -269,6 +269,7 @@ PUT /api/v1/system/nat/options
 | `LANDSCAPE_NAT_ICMP_TIMEOUT_SECS` | `60` | ICMP 超时 |
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
 | `LANDSCAPE_NAT_PORT_PRESERVE` | `0` | `1` 开启端口保持：优先用客户端原源端口（在 range 内且 WAN 槽空闲时），失败再走队列分配 |
+| `LANDSCAPE_NAT_REPORT_INTERVAL_SECS` | `30` | CT 定时器/指标上报周期（原 5s）。调大省 CPU、指标更粗；范围 1–3600 |
 
 ### 端口保持（opt-in）
 
@@ -304,21 +305,6 @@ bpftool map dump name napt_stats
 
 计数是普通 `ARRAY`（失败路径上原子加），`bpftool` 直接按 key 显示。
 
-### 监控分析里的 NAT 状态卡片
-
-**监控分析 → 活跃连接** 页面顶部新增「NAT 运行状态（nat_v4）」卡片：
-
-| 指标 | 含义 |
-|---|---|
-| 端口耗尽 | 新流分不到外部端口（`napt_stats[0]`） |
-| 指标丢弃 | 指标 ringbuf 满（`napt_stats[1]`） |
-| 端口保持成功 | `napt_stats[2]` |
-| CT 上限 | `napt_ct` 的 `max_entries` |
-
-- 每 5 秒自动刷新，也可点「刷新」；
-- 数据来源：webserver 调用 `bpftool -j map dump name napt_stats`（OpenWrt 自带），
-  不依赖 map pin；
-- NAT 未启用时显示「NAT 计数不可用」。
 
 注意：
 
@@ -331,9 +317,11 @@ bpftool map dump name napt_stats
 - 超时/ full cone 的 rodata 在 **NAT 段 attach 时**写入（`stages/nat4.rs`），改了要重启 **WAN 链路服务**（或整个 Landscape）；
 - XDP NAT 路径复用 TC 的 conntrack，但超时/ full cone 的 rodata 只对 TC 数据面设置，XDP 路径仍用 C 默认值（当前 `xdp:` 为空，不影响）；
 - 以上改动只针对 **IPv4 NAT**；NAT6 的对应优化未包含。
-- **TCP 空闲 24h 的代价**：每个 ACTIVE CT 仍按 5s 周期跑一次 `bpf_timer`（指标上报），
-  CT 存活越久、同时在线的条目越多，timer 唤醒就越多。R6S 家宽一般够用；若发现
-  `ksoftirqd`/CPU 偏高，把 TCP 空闲降到 1800~3600 即可。
+- **TCP 空闲 24h 的代价**：每个 ACTIVE CT 仍按其 `report_interval`（默认 **30s**，原 5s）
+  跑一次 `bpf_timer`（状态机 + 指标上报）。调大间隔能成比例减少 timer 唤醒；
+  若想指标恢复 5s 粒度，`LANDSCAPE_NAT_REPORT_INTERVAL_SECS=5` 即可。
+- **指标与状态机仍耦合**：当前只是把 tick 从 5s 调到 30s（6 倍降频）。真正解耦
+  （状态变化时才上报 + 独立低频采样）需要改 CT 状态机，属于下一阶段。
 
 ## 已知限制 / 下一步
 

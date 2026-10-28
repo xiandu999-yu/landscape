@@ -25,6 +25,8 @@ pub struct NatOptionsDto {
     pub icmp_timeout_secs: u64,
     #[serde(default)]
     pub port_preserve: bool,
+    #[serde(default = "default_report_interval")]
+    pub report_interval_secs: u64,
 }
 
 fn default_tcp_syn() -> u64 {
@@ -42,6 +44,9 @@ fn default_udp() -> u64 {
 fn default_icmp() -> u64 {
     60
 }
+fn default_report_interval() -> u64 {
+    30
+}
 
 impl Default for NatOptionsDto {
     fn default() -> Self {
@@ -53,6 +58,7 @@ impl Default for NatOptionsDto {
             udp_timeout_secs: default_udp(),
             icmp_timeout_secs: default_icmp(),
             port_preserve: false,
+            report_interval_secs: default_report_interval(),
         }
     }
 }
@@ -103,6 +109,12 @@ fn validate(dto: &NatOptionsDto) -> Result<(), DbError> {
                 "{name} must be within 1..=86400 (got {value})"
             )));
         }
+    }
+    if dto.report_interval_secs == 0 || dto.report_interval_secs > 3_600 {
+        return Err(DbError::Internal(format!(
+            "report_interval_secs must be within 1..=3600 (got {})",
+            dto.report_interval_secs
+        )));
     }
     Ok(())
 }

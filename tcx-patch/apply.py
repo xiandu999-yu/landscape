@@ -247,6 +247,12 @@ def main() -> None:
         "#define NAPT_UDP_MIN_TIMEOUT_NS land_nat_udp_min_timeout_ns\n"
         "#define NAPT_ICMP_TIMEOUT_NS land_nat_icmp_timeout_ns\n",
     )
+    #        CT timer tick / metric report interval: 5s -> configurable (30s).
+    patch(
+        nat_timer,
+        "#define NAPT_CT_REPORT_INTERVAL_NS (5ULL * NAPT_NSEC_PER_SEC)\n",
+        "#define NAPT_CT_REPORT_INTERVAL_NS land_nat_report_interval_ns\n",
+    )
     #        UDP becomes two-stage (einat style): short timeout until a reply
     #        is seen from the WAN side, then the long UDP timeout.
     patch(
@@ -291,7 +297,9 @@ def main() -> None:
         "const volatile __u64 land_nat_tcp_timeout_ns = 86400000000000ULL;\n"
         "const volatile __u64 land_nat_udp_timeout_ns = 600000000000ULL;\n"
         "const volatile __u64 land_nat_udp_min_timeout_ns = 120000000000ULL;\n"
-        "const volatile __u64 land_nat_icmp_timeout_ns = 60000000000ULL;\n\n"
+        "const volatile __u64 land_nat_icmp_timeout_ns = 60000000000ULL;\n"
+        "/* CT timer tick / metric report interval (default 30s, was 5s). */\n"
+        "const volatile __u64 land_nat_report_interval_ns = 30000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 1;\n\n"
         "/* 1 = try to keep the client's source port (opt-in, default off). */\n"
@@ -352,11 +360,13 @@ def main() -> None:
         "        rodata.land_nat_udp_timeout_ns = nat_opts.udp_timeout_ns;\n"
         "        rodata.land_nat_udp_min_timeout_ns = nat_opts.udp_min_timeout_ns;\n"
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
+        "        rodata.land_nat_report_interval_ns = nat_opts.report_interval_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
         "        rodata.land_nat_port_preserve = if nat_opts.port_preserve { 1 } else { 0 };\n"
         "        tracing::info!(\n"
         "            full_cone = nat_opts.full_cone,\n"
         "            port_preserve = nat_opts.port_preserve,\n"
+        "            report_interval_ns = nat_opts.report_interval_ns,\n"
         "            \"nat4 runtime options\"\n"
         "        );\n",
     )
@@ -594,34 +604,6 @@ def main() -> None:
         nat_packet2,
         "        if (napt_create_dynamic_mapping(proto, src_addr, internal_port, dst_addr,",
     )
-    # 9) NAT monitor card under 监控分析 -> 活跃连接.
-    patch(
-        "landscape-webserver/src/system/mod.rs",
-        "pub mod nat_options;\n",
-        "pub mod nat_options;\npub mod nat_monitor;\n",
-    )
-    patch(
-        "landscape-webserver/src/system/config.rs",
-        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n",
-        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n"
-        "        .routes(routes!(super::nat_monitor::get_nat_monitor))\n",
-    )
-    live_metric = "landscape-webui/src/views/metric/conn/LiveMetric.vue"
-    patch(
-        live_metric,
-        'import ConnectViewSwitcher from "@/components/metric/connect/ConnectViewSwitcher.vue";\n',
-        'import ConnectViewSwitcher from "@/components/metric/connect/ConnectViewSwitcher.vue";\n'
-        'import NatMonitorCard from "@/components/nat/NatMonitorCard.vue";\n',
-    )
-    patch(
-        live_metric,
-        '  <n-flex vertical style="flex: 1; overflow: hidden">\n'
-        "    <!-- System-wide active connection stats -->\n",
-        '  <n-flex vertical style="flex: 1; overflow: hidden">\n'
-        "    <NatMonitorCard />\n"
-        "    <!-- System-wide active connection stats -->\n",
-    )
-
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
