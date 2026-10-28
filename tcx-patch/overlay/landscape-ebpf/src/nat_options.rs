@@ -34,6 +34,9 @@ pub struct NatOptions {
     pub port_preserve: bool,
     /// CT timer / metric report interval (the state machine tick).
     pub report_interval_ns: u64,
+    /// Event-driven CT timers: no periodic tick, timer re-armed with the idle
+    /// timeout on every packet. Disables per-CT metric updates.
+    pub event_driven: bool,
 }
 
 impl Default for NatOptions {
@@ -47,6 +50,7 @@ impl Default for NatOptions {
             icmp_timeout_ns: 60 * NS,
             port_preserve: false,
             report_interval_ns: 30 * NS,
+            event_driven: true,
         }
     }
 }
@@ -77,6 +81,36 @@ fn secs(value: u64, default_ns: u64) -> u64 {
     if value == 0 { default_ns } else { value * NS }
 }
 
+/// Whether Landscape's metric service is configured as `off` in
+/// `$HOME/.landscape-router/landscape.toml`. Missing config means the default
+/// mode (`Persistent`), i.e. metrics on.
+fn metric_mode_off() -> bool {
+    let Ok(home) = std::env::var("HOME") else { return false };
+    let path = std::path::Path::new(&home)
+        .join(landscape_common::LANDSCAPE_CONFIG_DIR_NAME)
+        .join(landscape_common::LAND_CONFIG);
+    let Ok(text) = std::fs::read_to_string(&path) else { return false };
+
+    let mut in_metric = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_metric = line == "[metric]";
+            continue;
+        }
+        if !in_metric {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "mode" {
+                let value = value.trim().trim_matches('"').to_ascii_lowercase();
+                return value == "off";
+            }
+        }
+    }
+    false
+}
+
 impl NatOptions {
     pub fn load() -> Self {
         let mut opts = Self::default();
@@ -90,6 +124,9 @@ impl NatOptions {
                         }
                         if let Some(v) = doc.get("port_preserve").and_then(|v| v.as_bool()) {
                             opts.port_preserve = v;
+                        }
+                        if let Some(v) = doc.get("event_driven").and_then(|v| v.as_bool()) {
+                            opts.event_driven = v;
                         }
                         for (key, dst) in [
                             ("tcp_syn_timeout_secs", &mut opts.tcp_syn_timeout_ns),
@@ -114,6 +151,7 @@ impl NatOptions {
         // Env overrides (scripted setups / one-off debugging).
         opts.full_cone = env_bool("LANDSCAPE_NAT_FULL_CONE", opts.full_cone);
         opts.port_preserve = env_bool("LANDSCAPE_NAT_PORT_PRESERVE", opts.port_preserve);
+        opts.event_driven = env_bool("LANDSCAPE_NAT_EVENT_DRIVEN", opts.event_driven);
         opts.tcp_syn_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS", opts.tcp_syn_timeout_ns / NS),
                  opts.tcp_syn_timeout_ns);
@@ -132,6 +170,14 @@ impl NatOptions {
         opts.report_interval_ns =
             secs(env_u64("LANDSCAPE_NAT_REPORT_INTERVAL_SECS", opts.report_interval_ns / NS),
                  opts.report_interval_ns);
+
+        // Metric mode drives the timer model: an enabled metric service needs
+        // periodic 5s reporting, so fall back from event-driven mode. Only a
+        // literal `[metric] mode = "off"` keeps event-driven timers.
+        if !metric_mode_off() {
+            opts.event_driven = false;
+            opts.report_interval_ns = 5 * NS;
+        }
 
         opts
     }

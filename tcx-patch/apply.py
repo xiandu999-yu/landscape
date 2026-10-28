@@ -286,6 +286,53 @@ def main() -> None:
         "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
         "    }\n",
     )
+    #        shared timeout selector (used by the packet path in event-driven mode)
+    patch(
+        nat_timer,
+        "static __always_inline __u64 napt_ct_wait_ns(const struct napt_ct_key *key,\n",
+        "static __always_inline __u64 napt_ct_timeout_for(__u8 proto,\n"
+        "                                                 const struct napt_ct_value *value) {\n"
+        "    if (proto == IPV4_PROTO_UDP) {\n"
+        "        if (value->server_status == NAPT_TCP_STATE_LESS_EST) return NAPT_UDP_TIMEOUT_NS;\n"
+        "        return NAPT_UDP_MIN_TIMEOUT_NS;\n"
+        "    }\n"
+        "    if (proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n"
+        "    if (proto == IPV4_PROTO_TCP) {\n"
+        "        if (value->client_status == NAPT_TCP_STATE_LESS_EST &&\n"
+        "            value->server_status == NAPT_TCP_STATE_LESS_EST)\n"
+        "            return NAPT_TCP_TIMEOUT_NS;\n"
+        "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
+        "    }\n"
+        "    return NAPT_UDP_TIMEOUT_NS;\n"
+        "}\n\n"
+        "static __always_inline __u64 napt_ct_wait_ns(const struct napt_ct_key *key,\n",
+    )
+    #        event-driven mode: arm the timer with the idle timeout on every
+    #        packet, and on expiry jump straight to RELEASE (port return).
+    patch(
+        nat_timer,
+        "    /* Metrics are advisory: a full/lagging ringbuf or metric mode=off must\n",
+        "    if (land_nat_event_driven && current < NAPT_CT_RELEASE) {\n"
+        "        if (!__sync_bool_compare_and_swap(&value->status, current, NAPT_CT_RELEASE)) {\n"
+        "            *next_timeout = NAPT_CT_REPORT_INTERVAL_NS;\n"
+        "            return NAPT_TIMER_STEP_RESTART;\n"
+        "        }\n"
+        "        *next_timeout = 1;\n"
+        "        return NAPT_TIMER_STEP_RESTART;\n"
+        "    }\n\n"
+        "    /* Metrics are advisory: a full/lagging ringbuf or metric mode=off must\n",
+    )
+    #        packet path: in event-driven mode re-arm with the flow's idle timeout
+    patch(
+        nat_timer,
+        "        if (prev == status) napt_ct_timer_start(value, NAPT_CT_REPORT_INTERVAL_NS);\n",
+        "        if (prev == status) {\n"
+        "            __u64 next_interval = land_nat_event_driven\n"
+        "                                      ? napt_ct_timeout_for(l4_protocol, value)\n"
+        "                                      : NAPT_CT_REPORT_INTERVAL_NS;\n"
+        "            napt_ct_timer_start(value, next_interval);\n"
+        "        }\n",
+    )
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(
         nat_rodata,
@@ -303,7 +350,9 @@ def main() -> None:
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 1;\n\n"
         "/* 1 = try to keep the client's source port (opt-in, default off). */\n"
-        "const volatile __u8 land_nat_port_preserve = 0;\n",
+        "const volatile __u8 land_nat_port_preserve = 0;\n\n"
+        "/* 1 = event-driven CT timers (no periodic tick; metrics stop). */\n"
+        "const volatile __u8 land_nat_event_driven = 1;\n",
     )
     #    6c) full-cone by default: allow_reuse is OR-ed with the rodata switch.
     nat_packet = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h"
@@ -363,9 +412,11 @@ def main() -> None:
         "        rodata.land_nat_report_interval_ns = nat_opts.report_interval_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
         "        rodata.land_nat_port_preserve = if nat_opts.port_preserve { 1 } else { 0 };\n"
+        "        rodata.land_nat_event_driven = if nat_opts.event_driven { 1 } else { 0 };\n"
         "        tracing::info!(\n"
         "            full_cone = nat_opts.full_cone,\n"
         "            port_preserve = nat_opts.port_preserve,\n"
+        "            event_driven = nat_opts.event_driven,\n"
         "            report_interval_ns = nat_opts.report_interval_ns,\n"
         "            \"nat4 runtime options\"\n"
         "        );\n",

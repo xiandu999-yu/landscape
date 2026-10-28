@@ -27,6 +27,8 @@ pub struct NatOptionsDto {
     pub port_preserve: bool,
     #[serde(default = "default_report_interval")]
     pub report_interval_secs: u64,
+    #[serde(default = "default_event_driven")]
+    pub event_driven: bool,
 }
 
 fn default_tcp_syn() -> u64 {
@@ -47,6 +49,9 @@ fn default_icmp() -> u64 {
 fn default_report_interval() -> u64 {
     30
 }
+fn default_event_driven() -> bool {
+    true
+}
 
 impl Default for NatOptionsDto {
     fn default() -> Self {
@@ -59,6 +64,7 @@ impl Default for NatOptionsDto {
             icmp_timeout_secs: default_icmp(),
             port_preserve: false,
             report_interval_secs: default_report_interval(),
+            event_driven: default_event_driven(),
         }
     }
 }

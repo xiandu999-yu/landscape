@@ -270,6 +270,7 @@ PUT /api/v1/system/nat/options
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
 | `LANDSCAPE_NAT_PORT_PRESERVE` | `0` | `1` 开启端口保持：优先用客户端原源端口（在 range 内且 WAN 槽空闲时），失败再走队列分配 |
 | `LANDSCAPE_NAT_REPORT_INTERVAL_SECS` | `30` | CT 定时器/指标上报周期（原 5s）。调大省 CPU、指标更粗；范围 1–3600 |
+| `LANDSCAPE_NAT_EVENT_DRIVEN` | `1` | `1`=事件驱动（无周期 tick）；`0`=周期上报模式。**metric 模式非 off 时强制 `0` + 5s** |
 
 ### 端口保持（opt-in）
 
@@ -317,11 +318,16 @@ bpftool map dump name napt_stats
 - 超时/ full cone 的 rodata 在 **NAT 段 attach 时**写入（`stages/nat4.rs`），改了要重启 **WAN 链路服务**（或整个 Landscape）；
 - XDP NAT 路径复用 TC 的 conntrack，但超时/ full cone 的 rodata 只对 TC 数据面设置，XDP 路径仍用 C 默认值（当前 `xdp:` 为空，不影响）；
 - 以上改动只针对 **IPv4 NAT**；NAT6 的对应优化未包含。
-- **TCP 空闲 24h 的代价**：每个 ACTIVE CT 仍按其 `report_interval`（默认 **30s**，原 5s）
-  跑一次 `bpf_timer`（状态机 + 指标上报）。调大间隔能成比例减少 timer 唤醒；
-  若想指标恢复 5s 粒度，`LANDSCAPE_NAT_REPORT_INTERVAL_SECS=5` 即可。
-- **指标与状态机仍耦合**：当前只是把 tick 从 5s 调到 30s（6 倍降频）。真正解耦
-  （状态变化时才上报 + 独立低频采样）需要改 CT 状态机，属于下一阶段。
+- **事件驱动模式（指标关闭时默认开）**：`LANDSCAPE_NAT_EVENT_DRIVEN=1` 时，每个报文把 CT 定时器
+  重置为**该流的空闲超时**（TCP 24h / UDP 600s / ICMP 60s），定时器到期直接进入
+  RELEASE → 回收端口，**没有任何周期性 tick**。空闲连接的 CPU 开销接近零。
+  - **指标联动**：`nat_options` 启动时会读 `$HOME/.landscape-router/landscape.toml` 的
+    `[metric] mode`。只要不是 `off`（含缺省 `persistent`），就自动
+    `event_driven=false` + `report_interval=5s`，保证活跃连接页面指标正常；
+    只有 `mode = "off"` 才保持事件驱动。
+  - 需要实时指标又想要事件驱动，属于矛盾需求；二选一。
+- **TCP 空闲 24h 的代价（仅周期模式）**：`EVENT_DRIVEN=0` 时每个 ACTIVE CT 仍按
+  `report_interval`（默认 **30s**，原 5s）跑一次 `bpf_timer`；调大间隔可成比例减少唤醒。
 
 ## 已知限制 / 下一步
 
