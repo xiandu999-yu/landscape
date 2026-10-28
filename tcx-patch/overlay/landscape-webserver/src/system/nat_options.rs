@@ -17,6 +17,8 @@ pub struct NatOptionsDto {
     pub tcp_syn_timeout_secs: u64,
     #[serde(default = "default_tcp")]
     pub tcp_timeout_secs: u64,
+    #[serde(default = "default_udp_min")]
+    pub udp_min_timeout_secs: u64,
     #[serde(default = "default_udp")]
     pub udp_timeout_secs: u64,
     #[serde(default = "default_icmp")]
@@ -28,6 +30,9 @@ fn default_tcp_syn() -> u64 {
 }
 fn default_tcp() -> u64 {
     86400
+}
+fn default_udp_min() -> u64 {
+    120
 }
 fn default_udp() -> u64 {
     600
@@ -42,6 +47,7 @@ impl Default for NatOptionsDto {
             full_cone: true,
             tcp_syn_timeout_secs: default_tcp_syn(),
             tcp_timeout_secs: default_tcp(),
+            udp_min_timeout_secs: default_udp_min(),
             udp_timeout_secs: default_udp(),
             icmp_timeout_secs: default_icmp(),
         }
@@ -85,6 +91,7 @@ fn validate(dto: &NatOptionsDto) -> Result<(), DbError> {
     for (name, value) in [
         ("tcp_syn_timeout_secs", dto.tcp_syn_timeout_secs),
         ("tcp_timeout_secs", dto.tcp_timeout_secs),
+        ("udp_min_timeout_secs", dto.udp_min_timeout_secs),
         ("udp_timeout_secs", dto.udp_timeout_secs),
         ("icmp_timeout_secs", dto.icmp_timeout_secs),
     ] {

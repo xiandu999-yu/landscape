@@ -189,14 +189,22 @@ def main() -> None:
         "#define NAPT_TCP_SYN_TIMEOUT_NS land_nat_tcp_syn_timeout_ns\n"
         "#define NAPT_TCP_TIMEOUT_NS land_nat_tcp_timeout_ns\n"
         "#define NAPT_UDP_TIMEOUT_NS land_nat_udp_timeout_ns\n"
+        "#define NAPT_UDP_MIN_TIMEOUT_NS land_nat_udp_min_timeout_ns\n"
         "#define NAPT_ICMP_TIMEOUT_NS land_nat_icmp_timeout_ns\n",
     )
-    #        ICMP gets its own timeout (was sharing the UDP one).
+    #        UDP becomes two-stage (einat style): short timeout until a reply
+    #        is seen from the WAN side, then the long UDP timeout.
     patch(
         nat_timer,
         "    if (key->proto == IPV4_PROTO_UDP) return NAPT_UDP_TIMEOUT_NS;\n\n"
         "    if (key->proto == IPV4_PROTO_TCP) {\n",
-        "    if (key->proto == IPV4_PROTO_UDP) return NAPT_UDP_TIMEOUT_NS;\n"
+        "    if (key->proto == IPV4_PROTO_UDP) {\n"
+        "        /* Two-stage UDP timer: keep P2P/QUIC flows short until the\n"
+        "         * peer answers, then switch to the established timeout. */\n"
+        "        if (value->server_status == NAPT_TCP_STATE_LESS_EST)\n"
+        "            return NAPT_UDP_TIMEOUT_NS;\n"
+        "        return NAPT_UDP_MIN_TIMEOUT_NS;\n"
+        "    }\n"
         "    if (key->proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n\n"
         "    if (key->proto == IPV4_PROTO_TCP) {\n",
     )
@@ -210,6 +218,7 @@ def main() -> None:
         "const volatile __u64 land_nat_tcp_syn_timeout_ns = 120000000000ULL;\n"
         "const volatile __u64 land_nat_tcp_timeout_ns = 86400000000000ULL;\n"
         "const volatile __u64 land_nat_udp_timeout_ns = 600000000000ULL;\n"
+        "const volatile __u64 land_nat_udp_min_timeout_ns = 120000000000ULL;\n"
         "const volatile __u64 land_nat_icmp_timeout_ns = 60000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 1;\n",
@@ -267,6 +276,7 @@ def main() -> None:
         "        rodata.land_nat_tcp_syn_timeout_ns = nat_opts.tcp_syn_timeout_ns;\n"
         "        rodata.land_nat_tcp_timeout_ns = nat_opts.tcp_timeout_ns;\n"
         "        rodata.land_nat_udp_timeout_ns = nat_opts.udp_timeout_ns;\n"
+        "        rodata.land_nat_udp_min_timeout_ns = nat_opts.udp_min_timeout_ns;\n"
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n",
     )
@@ -316,6 +326,7 @@ def main() -> None:
         "  full_cone: true,\n"
         "  tcp_syn_timeout_secs: 120,\n"
         "  tcp_timeout_secs: 86400,\n"
+        "  udp_min_timeout_secs: 120,\n"
         "  udp_timeout_secs: 600,\n"
         "  icmp_timeout_secs: 60,\n"
         "});\n",
@@ -357,6 +368,14 @@ def main() -> None:
         '      <n-form-item label="TCP 空闲超时 (秒)">\n'
         '        <n-input-number\n'
         '          v-model:value="nat_options.tcp_timeout_secs"\n'
+        '          :min="1"\n'
+        '          :max="86400"\n'
+        '          style="width: 160px"\n'
+        '        />\n'
+        '      </n-form-item>\n'
+        '      <n-form-item label="UDP 半开超时 (秒)">\n'
+        '        <n-input-number\n'
+        '          v-model:value="nat_options.udp_min_timeout_secs"\n'
         '          :min="1"\n'
         '          :max="86400"\n'
         '          style="width: 160px"\n'

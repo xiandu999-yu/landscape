@@ -24,7 +24,9 @@ pub struct NatOptions {
     pub tcp_syn_timeout_ns: u64,
     /// TCP established idle timeout.
     pub tcp_timeout_ns: u64,
-    /// UDP idle timeout.
+    /// UDP timeout before any reply is seen (einat's `timeout_udp_min`).
+    pub udp_min_timeout_ns: u64,
+    /// UDP idle timeout once the peer has answered.
     pub udp_timeout_ns: u64,
     /// ICMP idle timeout.
     pub icmp_timeout_ns: u64,
@@ -36,6 +38,7 @@ impl Default for NatOptions {
             full_cone: true,
             tcp_syn_timeout_ns: 120 * NS,
             tcp_timeout_ns: 24 * 3600 * NS,
+            udp_min_timeout_ns: 120 * NS,
             udp_timeout_ns: 600 * NS,
             icmp_timeout_ns: 60 * NS,
         }
@@ -82,6 +85,7 @@ impl NatOptions {
                         for (key, dst) in [
                             ("tcp_syn_timeout_secs", &mut opts.tcp_syn_timeout_ns),
                             ("tcp_timeout_secs", &mut opts.tcp_timeout_ns),
+                            ("udp_min_timeout_secs", &mut opts.udp_min_timeout_ns),
                             ("udp_timeout_secs", &mut opts.udp_timeout_ns),
                             ("icmp_timeout_secs", &mut opts.icmp_timeout_ns),
                         ] {
@@ -105,6 +109,9 @@ impl NatOptions {
         opts.tcp_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_TCP_TIMEOUT_SECS", opts.tcp_timeout_ns / NS),
                  opts.tcp_timeout_ns);
+        opts.udp_min_timeout_ns =
+            secs(env_u64("LANDSCAPE_NAT_UDP_MIN_TIMEOUT_SECS", opts.udp_min_timeout_ns / NS),
+                 opts.udp_min_timeout_ns);
         opts.udp_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_UDP_TIMEOUT_SECS", opts.udp_timeout_ns / NS),
                  opts.udp_timeout_ns);

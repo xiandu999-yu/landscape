@@ -5,6 +5,7 @@ export interface NatOptions {
   full_cone: boolean;
   tcp_syn_timeout_secs: number;
   tcp_timeout_secs: number;
+  udp_min_timeout_secs: number;
   udp_timeout_secs: number;
   icmp_timeout_secs: number;
 }

@@ -214,7 +214,8 @@ UDP 端口段
 ICMP ID 段
 TCP 半开超时 (秒)      [ 120 ]
 TCP 空闲超时 (秒)      [ 86400 ]
-UDP 超时 (秒)          [ 600 ]
+UDP 半开超时 (秒)      [ 120 ]     ← 未见回包时用
+UDP 超时 (秒)          [ 600 ]     ← 见到回包后切换
 ICMP 超时 (秒)         [ 60 ]
 Full Cone (EIM/EIF)   [开关]     ← 默认开
 [更新]
@@ -226,13 +227,17 @@ Full Cone (EIM/EIF)   [开关]     ← 默认开
 |---|---|---|
 | TCP 半开超时 | `timeout_tcp_trans = "2m"` | 120s |
 | TCP 空闲超时 | `timeout_tcp_est = "24h"` | 86400s |
+| UDP 半开超时 | `timeout_udp_min = "2m"` | 120s |
 | UDP 超时 | `timeout_udp_default = "10m"` | 600s |
 | ICMP 超时 | `timeout_icmp_default = "1m"` | 60s |
 
-两个 einat 项在 Landscape 里没有直接对应：
+实现方式：`napt_ct_advance_pkt` 在收到 WAN 侧报文时把 `server_status` 置为
+`NAPT_TCP_STATE_LESS_EST`；`napt_ct_wait_ns` 对 UDP 判断这个状态：
+未见回包 → `UDP_MIN`（120s），见过回包 → `UDP`（600s）。与 einat 的
+`INIT_OUT/INIT_IN -> ESTABLISHED` 两段式等价。
 
-- `timeout_fragment = "5s"`：Landscape 的 nat_v4 CT 只跟踪 TCP/UDP/ICMP，没有分片条目；
-- `timeout_udp_min = "2m"`：Landscape 是单一 UDP 超时，没有 einat 那种 per-flow 的 min/established 两段式。
+einat 的 `timeout_fragment = "5s"` 没有直接对应：Landscape 只用
+`napt_is_non_initial()` 识别非首片，不做 einat 那样的 frag 端口记忆。
 
 保存时前端会先 `PUT /api/v1/system/nat/options` 写 `$HOME/.landscape-router/nat-options.json`，
 再保存 WAN link；`landscape_ebpf::nat_options::reload()` 刷新缓存，下次 NAT attach 时生效。
@@ -243,8 +248,8 @@ API：
 GET /api/v1/system/nat/options
 PUT /api/v1/system/nat/options
    { "full_cone": true, "tcp_syn_timeout_secs": 120,
-     "tcp_timeout_secs": 86400, "udp_timeout_secs": 600,
-     "icmp_timeout_secs": 60 }
+     "tcp_timeout_secs": 86400, "udp_min_timeout_secs": 120,
+     "udp_timeout_secs": 600, "icmp_timeout_secs": 60 }
 ```
 
 环境变量（优先级高于 JSON，方便脚本/调试）：
@@ -253,12 +258,19 @@ PUT /api/v1/system/nat/options
 |---|---|---|
 | `LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS` | `120` | TCP 半开超时 |
 | `LANDSCAPE_NAT_TCP_TIMEOUT_SECS` | `86400` | TCP 已建立空闲超时 |
-| `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `600` | UDP 超时（QUIC/游戏建议 120 或更短） |
+| `LANDSCAPE_NAT_UDP_MIN_TIMEOUT_SECS` | `120` | UDP 未见回包时的短超时 |
+| `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `600` | UDP 已见回包时的超时（QUIC/游戏建议 120 或更短） |
 | `LANDSCAPE_NAT_ICMP_TIMEOUT_SECS` | `60` | ICMP 超时 |
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
 
 注意：
 
+- **WAN 地址变化已自动处理**：nat4 section 的作用域是 `SectionScope::SessionAndLease`
+  （`wan_link_service/mod.rs`），租约 v4 地址变化会重启 NAT 段并重新烘 rodata，
+  DHCP 换地址不需要手工重启。
+- **内存占用**：`napt_from_wan` 是 ARRAY，3 × 65536 × 32B ≈ **6.3 MB/链路**；
+  三个端口队列 3 × 65536 × 8B ≈ 1.5 MB；`napt_from_lan` / `napt_ct` 各 196608 条
+  （`BPF_F_NO_PREALLOC`）。多 WAN 时线性增长，后续可考虑 HASH/索引表优化。
 - 超时/ full cone 的 rodata 在 **NAT 段 attach 时**写入（`stages/nat4.rs`），改了要重启 **WAN 链路服务**（或整个 Landscape）；
 - XDP NAT 路径复用 TC 的 conntrack，但超时/ full cone 的 rodata 只对 TC 数据面设置，XDP 路径仍用 C 默认值（当前 `xdp:` 为空，不影响）；
 - 以上改动只针对 **IPv4 NAT**；NAT6 的对应优化未包含。
