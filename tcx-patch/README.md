@@ -204,7 +204,7 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 | CT 超时写死 6s / 10min / 5min | 改为 rodata 可调，默认值不变 |
 | Full cone 依赖流控 `allow_reuse_port` 标记，默认是 EDF | 新增 **WebUI 开关**（NAT 服务弹窗），默认开启 EIM+EIF（full cone） |
 
-### Full Cone 开关在哪里
+### Full Cone / 超时 开关在哪里
 
 拓扑 → 点 WAN 接口 → **NAT 服务** 弹窗，在三个端口段下面：
 
@@ -212,7 +212,10 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 TCP 端口段
 UDP 端口段
 ICMP ID 段
-Full Cone (EIM/EIF)   [开关]     ← 新增，默认开
+TCP 半开超时 (秒)      [ 6 ]
+TCP 空闲超时 (秒)      [ 600 ]
+UDP/ICMP 超时 (秒)     [ 300 ]
+Full Cone (EIM/EIF)   [开关]     ← 默认开
 [更新]
 ```
 
