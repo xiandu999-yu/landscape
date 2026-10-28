@@ -124,3 +124,121 @@ jobs:
           name: landscape-tcx-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # musl static build (OpenWrt / any musl distro). Cross-compiled from the
+  # x86_64 runner with cargo-zigbuild + Alpine sysroot, mirroring upstream's
+  # scripts/build_musl_static.sh.
+  # ---------------------------------------------------------------------------
+  musl:
+    name: musl ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-ebpf/src/tcx.rs
+          grep -q 'attached TC hook via TCX' src/landscape-ebpf/src/landscape.rs
+          grep -q 'pub mod tcx;' src/landscape-ebpf/src/lib.rs
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.target }}
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 marks pip as externally managed (PEP 668); --user alone
+          # is rejected, so fall back to --break-system-packages on the runner.
+          python3 -m pip install --user 'ziglang==0.16.0' ||
+            python3 -m pip install --user --break-system-packages 'ziglang==0.16.0'
+          echo "$HOME/.local/bin" >> "${GITHUB_PATH}"
+          export PATH="$HOME/.local/bin:${PATH}"
+          zig version
+          cargo install --locked cargo-zigbuild
+          cargo zigbuild --version
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+            ~/sysroots
+          key: tcx-musl-${{ matrix.target }}-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            tcx-musl-${{ matrix.target }}-${{ inputs.baseline }}-
+
+      - name: Build static musl binaries
+        working-directory: src
+        env:
+          GATEWAY: "1"
+          STATIC: "1"
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:${PATH}"
+          ./scripts/build_musl_static.sh ${{ matrix.target }}
+          ls -l output
+
+      - name: Verify binaries are statically linked
+        working-directory: src
+        run: |
+          set -euo pipefail
+          for f in output/landscape-webserver-${{ matrix.arch }}-static \
+                   output/redirect_pkg_handler-${{ matrix.arch }}-static; do
+            echo "== $f"
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+            file "$f"
+            if readelf -d "$f" 2>/dev/null | grep -q NEEDED; then
+              echo "::error::$f is dynamically linked"
+              readelf -d "$f" | head -n 20
+              exit 1
+            fi
+          done
+
+      - name: Upload static artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-tcx-musl-${{ matrix.arch }}
+          path: |
+            src/output/landscape-webserver-${{ matrix.arch }}-static
+            src/output/redirect_pkg_handler-${{ matrix.arch }}-static
+          if-no-files-found: error
