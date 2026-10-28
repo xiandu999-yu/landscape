@@ -262,19 +262,50 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # WebUI static assets (Vue). Independent of the TCX patch: the same v0.27.2
-  # frontend is produced, packaged as static.zip for /mnt/emmc/.landscape-router/static.
+  # WebUI static assets (Vue). The TCX overlay patches the Vue sources too, so
+  # this job MUST apply the overlay before building — otherwise the resulting
+  # bundle has no TCX editor (the historical bug that shipped a vanilla UI).
   # ---------------------------------------------------------------------------
   webui:
     name: webui static
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
       - name: Checkout upstream ${{ inputs.baseline }}
         uses: actions/checkout@v6
         with:
           repository: ThisSeanZhang/landscape
           ref: ${{ inputs.baseline }}
           path: src
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify webui overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-webui/src/components/tcx/TcxOrderSection.vue || {
+            echo "::error::TcxOrderSection.vue missing"; exit 1; }
+          test -f src/landscape-webui/src/api/tcx_order.ts || {
+            echo "::error::tcx_order.ts missing"; exit 1; }
+          grep -q 'TcxOrderSection' src/landscape-webui/src/components/route/wan/RouteWanServiceEditModal.vue || {
+            echo "::error::WAN modal was not patched"; exit 1; }
+          grep -q 'TcxOrderSection' src/landscape-webui/src/components/route/lan/RouteLanServiceEditModal.vue || {
+            echo "::error::LAN modal was not patched"; exit 1; }
+          grep -q 'tcx_order' src/landscape-webserver/src/system/config.rs || {
+            echo "::error::backend routes not patched"; exit 1; }
 
       - name: Install build toolchain
         working-directory: src
@@ -317,6 +348,19 @@ jobs:
       - name: Build webui
         working-directory: src
         run: pnpm --filter landscape-webui build
+
+      - name: Verify TCX editor is in the bundle
+        working-directory: src
+        run: |
+          set -euo pipefail
+          if ! grep -Rql "tcx/order" landscape-webui/dist; then
+            echo "::error::the built bundle has no 'tcx/order' call — the TCX editor was not compiled in"
+            echo "---- dist assets ----"
+            find landscape-webui/dist -type f | head -n 20
+            exit 1
+          fi
+          echo "TCX editor present in:"
+          grep -Rl "tcx/order" landscape-webui/dist | head -n 5
 
       - name: Package static assets
         working-directory: src
