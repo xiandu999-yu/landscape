@@ -95,12 +95,50 @@ tcx-patch/overlay/landscape-ebpf/src/tcx.rs
 | 变量 | 取值 | 默认 | 作用 |
 |---|---|---|---|
 | `LANDSCAPE_TCX_MODE` | `auto` / `off` / `require` | `auto` | `auto`：内核 ≥6.6 用 TCX；`off`：只用 clsact；`require`：必须 TCX |
-| `LANDSCAPE_TCX_ORDER` | `first` / `last` / `position` / `before` / `after` | `last` | 在 TCX 链中的插入位置 |
+| `LANDSCAPE_TCX_ORDER` | `first` / `last` / `position` / `before` / `after` | `last` | 全局默认位置 |
 | `LANDSCAPE_TCX_POSITION` | 整数 | `0` | `order=position` 时的目标下标（0=链首） |
 | `LANDSCAPE_TCX_RELATIVE` | 程序名 | 空 | `order=before/after` 时的目标程序名，如 `egress_snat` |
 | `LANDSCAPE_TCX_STRICT` | `0` / `1` | `0` | TCX 失败时是否让服务失败（否则回退 clsact） |
 | `LANDSCAPE_TC_PRIO` | 1..65535 | `1` | clsact 回退时的 priority |
 | `LANDSCAPE_TC_HANDLE` | u32 | `1` | clsact 回退时的 handle |
+| `LANDSCAPE_TCX_IFACE_ORDER` | `iface:dir=order;...` | 空 | **按接口/方向覆盖顺序**（见下） |
+| `LANDSCAPE_TCX_RULES_FILE` | 路径 | `$HOME/.landscape-router/tcx-order.json` | 按接口顺序的 JSON 规则文件 |
+
+### 按接口覆盖顺序
+
+```sh
+# 语法：<接口名或 ifindex>:<in|out>=<first|last|position:N|before:PROG|after:PROG>
+LANDSCAPE_TCX_IFACE_ORDER="eth0:out=after:egress_snat;eth0:in=last;eth1:in=first"
+```
+
+也可以写 JSON 文件（`$HOME/.landscape-router/tcx-order.json`），便于脚本/前端生成：
+
+```json
+{
+  "ifaces": [
+    { "name": "eth0", "ingress": "last", "egress": "after:egress_snat" },
+    { "name": "eth2", "ingress": "first" }
+  ]
+}
+```
+
+优先级：`LANDSCAPE_TCX_IFACE_ORDER`（env） > JSON 文件 > 全局 `LANDSCAPE_TCX_ORDER`。
+未命中的接口/方向使用全局默认值；环境变量在进程启动时解析一次。
+
+## 程序命名
+
+补丁会把四个入口程序从通用的 `tc_*` 前缀改成项目前缀 **`land_*`**（与 sing-box 的
+`sb_*` 对齐），`bpftool net show` 里会看到：
+
+```
+eth0(2) tcx/ingress land_wan_ingress_intro ...
+eth0(2) tcx/egress  land_wan_egress_route  ...
+eth1(3) tcx/ingress land_lan_ingress_route ...
+```
+
+实现方式：`apply.py` 重命名 C 侧函数名（即 BPF 程序名）+ Rust 侧 `progs.<name>` 引用；
+skeleton 模块名来自 `.bpf.c` 文件名，保持不动，因此不会牵连 `crate::skel::*` 路径。
+
 
 示例：
 
@@ -131,10 +169,33 @@ TCX 中 `TCX_NEXT(-1)` 才继续下一个程序，`TC_ACT_OK(0)` 等于 `TCX_PAS
 - 放在链首/中间时，排在它后面的程序（如 einat）不会执行；
 - 若要让多个程序串联，需要把 Landscape 的出口程序改成返回 `TCX_NEXT`（未包含在本补丁中）。
 
+## WebUI 中配置 TCX 顺序
+
+打开拓扑 → 点 WAN 或 LAN 接口节点 → 在「Wan 路由转发服务」/「Lan 路由转发服务」卡片
+的「更新」按钮**上方**，会多出 **TCX 顺序（接口名）** 一段：
+
+- **Ingress 顺序**、**Egress 顺序**（LAN 只有 Ingress）：
+  `继承全局` / `链首 first` / `链尾 last` / `指定位置 position` / `在程序之前 before` / `在程序之后 after`
+- 选 `position` 时填下标，选 `before/after` 时填目标程序名（如 `egress_snat`）
+- 点 **保存 TCX 顺序** 后写入 `$HOME/.landscape-router/tcx-order.json`，并立即 reload
+  到 `landscape_ebpf::tcx` 的缓存
+- **生效时机**：保存后需要重启该接口的路由转发服务（也就是再点一次卡片上的「更新」），
+  或重启 Landscape；已经挂上的 TCX link 不会立刻重排
+
+对应接口：
+
+```
+GET  /api/v1/system/tcx/order   -> { rules, ifaces, global_order, mode }
+PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
+```
+
+规则字符串格式与 env 一致：`first` / `last` / `position:N` / `before:PROG` / `after:PROG`，
+空串表示继承全局。环境变量 `LANDSCAPE_TCX_IFACE_ORDER` 仍然优先于这个文件（WebUI 适合
+不设 env 的场景）。
+
 ## 已知限制 / 下一步
 
-- 本补丁只做 **TCX attach + 环境变量 + CI 编译**，未包含 WebUI 配置卡片；
-  配置面（`[tcx]` + `/api/v1/system/config/tcx` + Vue 卡片）建议在首轮 CI 绿后追加。
+- TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。
 - `LANDSCAPE_TCX_ORDER=position` 依赖 `bpf_prog_query` 返回的链序；若内核/权限
   不允许查询，会退化为追加。
 - 与 einat 的 ingress 兼容问题（0.27.x 按目的地址分发、einat 提前改写 dst）

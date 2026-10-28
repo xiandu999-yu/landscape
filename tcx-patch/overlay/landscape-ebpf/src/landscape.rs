@@ -70,12 +70,13 @@ impl TcHookProxy {
         };
 
         if want_tcx {
-            match tcx::attach(prog, ifindex, egress, &cfg.order) {
+            let order = tcx::order_for(ifindex, egress);
+            match tcx::attach(prog, ifindex, egress, &order) {
                 Ok(link) => {
                     tracing::info!(
                         ifindex,
                         egress,
-                        order = ?cfg.order,
+                        order = ?order,
                         "attached TC hook via TCX"
                     );
                     return Self { clsact: None, tcx: Some(link) };

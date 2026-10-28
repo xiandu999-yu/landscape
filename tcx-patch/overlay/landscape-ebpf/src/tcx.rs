@@ -42,10 +42,27 @@ pub enum Order {
     After(String),
 }
 
+/// Per-interface override of the chain position.
+///
+/// Sources, highest priority first:
+///   1. `LANDSCAPE_TCX_IFACE_ORDER` env var, e.g.
+///      `eth0:in=first;eth0:out=after:egress_snat;eth1:in=last`
+///   2. JSON file (`$LANDSCAPE_TCX_RULES_FILE`, default
+///      `$HOME/.landscape-router/tcx-order.json`), e.g.
+///      `{"ifaces":[{"name":"eth0","ingress":"first","egress":"after:egress_snat"}]}`
+///   3. global `LANDSCAPE_TCX_ORDER`
+#[derive(Clone, Debug)]
+pub struct IfaceRule {
+    pub ifindex: i32,
+    pub egress: bool,
+    pub order: Order,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub mode: Mode,
     pub order: Order,
+    pub iface_rules: Vec<IfaceRule>,
     pub strict: bool,
     pub clsact_prio: u32,
     pub clsact_handle: u32,
@@ -56,6 +73,7 @@ impl Default for Config {
         Self {
             mode: Mode::Auto,
             order: Order::Last,
+            iface_rules: Vec::new(),
             strict: false,
             clsact_prio: 1,
             clsact_handle: 1,
@@ -65,6 +83,108 @@ impl Default for Config {
 
 fn env_u32(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+}
+
+/// Parse `first | last | position:N | before:PROG | after:PROG`.
+fn parse_order(spec: &str) -> Option<Order> {
+    let s = spec.trim();
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "first" => Some(Order::First),
+        "last" => Some(Order::Last),
+        _ => {
+            if let Some(n) = lower.strip_prefix("position:") {
+                return n.trim().parse::<u32>().ok().map(Order::Position);
+            }
+            if let Some(name) = s.strip_prefix("before:").or_else(|| s.strip_prefix("Before:")) {
+                return Some(Order::Before(name.trim().to_string()));
+            }
+            if let Some(name) = s.strip_prefix("after:").or_else(|| s.strip_prefix("After:")) {
+                return Some(Order::After(name.trim().to_string()));
+            }
+            None
+        }
+    }
+}
+
+fn ifindex_of(name: &str) -> Option<i32> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if let Ok(n) = name.parse::<i32>() {
+        return (n > 0).then_some(n);
+    }
+    let cstr = std::ffi::CString::new(name).ok()?;
+    let idx = unsafe { libc::if_nametoindex(cstr.as_ptr()) };
+    (idx != 0).then_some(idx as i32)
+}
+
+fn parse_iface_rules(spec: &str) -> Vec<IfaceRule> {
+    let mut out = Vec::new();
+    for entry in spec.split([',', ';']) {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((lhs, ord)) = entry.split_once('=') else {
+            tracing::warn!(entry, "tcx iface rule ignored: missing '='");
+            continue;
+        };
+        let Some((iface, dir)) = lhs.rsplit_once(':') else {
+            tracing::warn!(entry, "tcx iface rule ignored: missing '<iface>:<dir>'");
+            continue;
+        };
+        let egress = matches!(dir.trim().to_ascii_lowercase().as_str(), "out" | "egress" | "e");
+        let Some(order) = parse_order(ord) else {
+            tracing::warn!(entry, "tcx iface rule ignored: bad order");
+            continue;
+        };
+        let Some(ifindex) = ifindex_of(iface) else {
+            tracing::warn!(entry, "tcx iface rule ignored: unknown interface");
+            continue;
+        };
+        out.push(IfaceRule { ifindex, egress, order });
+    }
+    out
+}
+
+/// Optional JSON rules file:
+/// `{"ifaces":[{"name":"eth0","ingress":"first","egress":"after:egress_snat"}]}`
+fn load_rules_file() -> Vec<IfaceRule> {
+    let path = std::env::var("LANDSCAPE_TCX_RULES_FILE").ok().map(std::path::PathBuf::from).or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| std::path::Path::new(&h).join(".landscape-router").join("tcx-order.json"))
+    });
+    let Some(path) = path else { return Vec::new() };
+    let Ok(raw) = std::fs::read_to_string(&path) else { return Vec::new() };
+    let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        tracing::warn!(path = %path.display(), "tcx rules file is not valid JSON; ignored");
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let Some(ifaces) = doc.get("ifaces").and_then(|v| v.as_array()) else { return out };
+    for item in ifaces {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()) else { continue };
+        let Some(ifindex) = ifindex_of(name) else {
+            tracing::warn!(name, "tcx rules file: unknown interface; ignored");
+            continue;
+        };
+        for (key, egress) in [("ingress", false), ("egress", true)] {
+            let Some(spec) = item.get(key).and_then(|v| v.as_str()) else { continue };
+            if let Some(order) = parse_order(spec) {
+                out.push(IfaceRule { ifindex, egress, order });
+            } else {
+                tracing::warn!(name, key, spec, "tcx rules file: bad order; ignored");
+            }
+        }
+    }
+    if !out.is_empty() {
+        tracing::info!(path = %path.display(), rules = out.len(), "loaded tcx per-interface order rules");
+    }
+    out
 }
 
 impl Config {
@@ -95,6 +215,14 @@ impl Config {
             _ => Order::Last,
         };
 
+        // Per-interface rules: file first, env second. `order_for()` returns the
+        // first match, so env entries take precedence over the file.
+        let mut rules = load_rules_file();
+        if let Ok(spec) = std::env::var("LANDSCAPE_TCX_IFACE_ORDER") {
+            rules.splice(0..0, parse_iface_rules(&spec));
+        }
+        cfg.iface_rules = rules;
+
         cfg
     }
 }
@@ -118,6 +246,25 @@ pub fn config() -> Config {
 pub fn set_config(cfg: Config) {
     if let Ok(mut guard) = slot().write() {
         *guard = cfg;
+    }
+}
+
+/// Resolve the chain position for one hook: a per-interface rule wins over the
+/// global `LANDSCAPE_TCX_ORDER`.
+pub fn order_for(ifindex: i32, egress: bool) -> Order {
+    let cfg = config();
+    cfg.iface_rules
+        .iter()
+        .find(|r| r.ifindex == ifindex && r.egress == egress)
+        .map(|r| r.order.clone())
+        .unwrap_or(cfg.order)
+}
+
+/// Re-read env + rules file (called by the WebUI after it rewrites the rules
+/// JSON). Takes effect for hooks attached afterwards.
+pub fn reload_from_env() {
+    if let Ok(mut guard) = slot().write() {
+        *guard = Config::from_env();
     }
 }
 
