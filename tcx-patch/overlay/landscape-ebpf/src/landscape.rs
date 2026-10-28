@@ -137,6 +137,15 @@ impl TcHookProxy {
 
 impl Drop for TcHookProxy {
     fn drop(&mut self) {
+        if let Some(link) = self.tcx.take() {
+            tracing::debug!(
+                ifindex = link.ifindex,
+                egress = link.egress,
+                order = ?link.order,
+                "detaching TCX link"
+            );
+            // `tcx::Link::drop` destroys the bpf_link (detaches).
+        }
         if let Some(mut hook) = self.clsact.take() {
             tracing::debug!("detach hook");
             if hook.query().is_ok() {
@@ -148,7 +157,6 @@ impl Drop for TcHookProxy {
                 }
             }
         }
-        // tcx: `tcx::Link::drop` destroys the bpf_link (detaches).
     }
 }
 

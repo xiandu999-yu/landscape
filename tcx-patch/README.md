@@ -13,6 +13,39 @@ tcx-patch/overlay/landscape-ebpf/src/tcx.rs        # 新增 TCX 后端
 tcx-patch/overlay/landscape-ebpf/src/landscape.rs  # TcHookProxy 双后端
 ```
 
+## 产物
+
+| job | 产物 | 适用系统 |
+|---|---|---|
+| `build`（gnu） | `landscape-webserver-<arch>-tcx`、`redirect_pkg_handler-<arch>-tcx` | glibc 发行版（Debian/Ubuntu 等） |
+| `musl`（静态） | `landscape-webserver-<arch>-static`、`redirect_pkg_handler-<arch>-static` | **OpenWrt / Alpine / 任意 musl 系统** |
+
+OpenWrt 必须用 `musl` job 的 `-static` 产物；gnu 产物在 musl 上会报
+`not found` 或 `Exec format error`。
+
+### 部署到 OpenWrt（aarch64）
+
+```sh
+# 1) 备份
+cp /usr/bin/landscape-webserver /usr/bin/landscape-webserver.bak 2>/dev/null || true
+
+# 2) 停服务（按你的 init 脚本名调整）
+/etc/init.d/landscape stop 2>/dev/null || service landscape stop 2>/dev/null || true
+
+# 3) 替换二进制（从 Actions artifact 下载后 scp 到 /tmp）
+chmod +x /tmp/landscape-webserver-aarch64-static
+mv /tmp/landscape-webserver-aarch64-static /usr/bin/landscape-webserver
+
+# 4) 验证是静态链接
+file /usr/bin/landscape-webserver        # 应含 "statically linked"
+ldd  /usr/bin/landscape-webserver        # 应报 "not a dynamic executable"
+
+# 5) 起服务
+/etc/init.d/landscape start
+```
+
+配置与数据库在 `/mnt/emmc/.landscape-router/`，换二进制不需要动它们。
+
 ## 使用方式
 
 1. Fork `ThisSeanZhang/landscape`（或者新建一个只放本目录内容的仓库）。
