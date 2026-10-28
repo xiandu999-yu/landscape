@@ -30,6 +30,8 @@ pub struct NatOptions {
     pub udp_timeout_ns: u64,
     /// ICMP idle timeout.
     pub icmp_timeout_ns: u64,
+    /// Keep the client's original source port when possible (opt-in).
+    pub port_preserve: bool,
 }
 
 impl Default for NatOptions {
@@ -41,6 +43,7 @@ impl Default for NatOptions {
             udp_min_timeout_ns: 120 * NS,
             udp_timeout_ns: 600 * NS,
             icmp_timeout_ns: 60 * NS,
+            port_preserve: false,
         }
     }
 }
@@ -82,6 +85,9 @@ impl NatOptions {
                         if let Some(v) = doc.get("full_cone").and_then(|v| v.as_bool()) {
                             opts.full_cone = v;
                         }
+                        if let Some(v) = doc.get("port_preserve").and_then(|v| v.as_bool()) {
+                            opts.port_preserve = v;
+                        }
                         for (key, dst) in [
                             ("tcp_syn_timeout_secs", &mut opts.tcp_syn_timeout_ns),
                             ("tcp_timeout_secs", &mut opts.tcp_timeout_ns),
@@ -103,6 +109,7 @@ impl NatOptions {
 
         // Env overrides (scripted setups / one-off debugging).
         opts.full_cone = env_bool("LANDSCAPE_NAT_FULL_CONE", opts.full_cone);
+        opts.port_preserve = env_bool("LANDSCAPE_NAT_PORT_PRESERVE", opts.port_preserve);
         opts.tcp_syn_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS", opts.tcp_syn_timeout_ns / NS),
                  opts.tcp_syn_timeout_ns);

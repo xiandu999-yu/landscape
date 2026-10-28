@@ -36,6 +36,39 @@ def patch(path: str, old: str, new: str) -> None:
     print(f"patched: {path}")
 
 
+def drop_if_block(path: str, marker: str) -> None:
+    """Remove the `if (...) { ... }` block that starts at `marker`.
+
+    Brace matching keeps this robust against upstream re-indentation, which a
+    literal anchor would not survive.
+    """
+    p = ROOT / path
+    text = p.read_text(encoding="utf-8")
+    idx = text.find(marker)
+    if idx < 0:
+        fail(f"if-block marker not found in {path}: {marker}")
+    brace = text.find("{", idx)
+    if brace < 0:
+        fail(f"no opening brace after marker in {path}")
+    depth = 0
+    i = brace
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    end = i + 1
+    if end < len(text) and text[end] == "\n":
+        end += 1
+    text = text[:idx] + text[end:]
+    p.write_text(text, encoding="utf-8")
+    print(f"dropped if-block: {path}")
+
+
 def main() -> None:
     if not (ROOT / "Cargo.toml").is_file():
         fail(f"{ROOT} does not look like the landscape checkout")
@@ -221,7 +254,9 @@ def main() -> None:
         "const volatile __u64 land_nat_udp_min_timeout_ns = 120000000000ULL;\n"
         "const volatile __u64 land_nat_icmp_timeout_ns = 60000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
-        "const volatile __u8 land_nat_full_cone = 1;\n",
+        "const volatile __u8 land_nat_full_cone = 1;\n\n"
+        "/* 1 = try to keep the client's source port (opt-in, default off). */\n"
+        "const volatile __u8 land_nat_port_preserve = 0;\n",
     )
     #    6c) full-cone by default: allow_reuse is OR-ed with the rodata switch.
     nat_packet = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h"
@@ -278,7 +313,8 @@ def main() -> None:
         "        rodata.land_nat_udp_timeout_ns = nat_opts.udp_timeout_ns;\n"
         "        rodata.land_nat_udp_min_timeout_ns = nat_opts.udp_min_timeout_ns;\n"
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
-        "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n",
+        "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
+        "        rodata.land_nat_port_preserve = if nat_opts.port_preserve { 1 } else { 0 };\n",
     )
 
     # 7) NAT options plumbing (full cone switch in the NAT modal).
@@ -405,6 +441,111 @@ def main() -> None:
         '      </n-form-item>\n',
     )
 
+    # 8) NAT4 port preservation (opt-in via LANDSCAPE_NAT_PORT_PRESERVE=1).
+    nat_tc = "landscape-ebpf/src/bpf/nat_v4/tc_nat4.h"
+    patch(
+        nat_tc,
+        '#include "nat_v4/tc_nat4_map.h"\n',
+        '#include "nat_v4/tc_nat4_map.h"\n#include "nat_v4/tc_nat4_rodata.h"\n',
+    )
+    patch(
+        nat_tc,
+        "#define NAPT_IP_MULTICAST_MASK bpf_ntohl(0xF0000000)\n",
+        "/* Claim a free WAN slot for the client's original source port. Free slots\n"
+        " * are zeroed by napt_wan_clear(), so generation 0 -> sentinel CAS wins\n"
+        " * exactly once even when two CPUs race on the same internal port. */\n"
+        "static __always_inline int napt_try_preserve_port(__u8 proto, __be16 internal_port,\n"
+        "                                                  __be16 *out_port, __u32 *out_gen) {\n"
+        "    struct napt_from_wan_value *slot;\n"
+        "    __u16 host_port = bpf_ntohs(internal_port);\n"
+        "    __u16 range_start;\n"
+        "    __u16 range_end;\n\n"
+        "    if (!land_nat_port_preserve) return -1;\n"
+        "    if (proto == IPV4_PROTO_TCP) {\n"
+        "        range_start = land_nat_tcp_range_start;\n"
+        "        range_end = land_nat_tcp_range_end;\n"
+        "    } else if (proto == IPV4_PROTO_UDP) {\n"
+        "        range_start = land_nat_udp_range_start;\n"
+        "        range_end = land_nat_udp_range_end;\n"
+        "    } else {\n"
+        "        return -1;\n"
+        "    }\n"
+        "    if (host_port < range_start || host_port >= range_end) return -1;\n\n"
+        "    slot = napt_wan_lookup(proto, internal_port);\n"
+        "    if (!slot) return -1;\n\n"
+        "    __u32 expected = 0;\n"
+        "    if (!__sync_bool_compare_and_swap(&slot->generation, expected, 0xFFFFFFFFU)) return -1;\n\n"
+        "    *out_port = internal_port;\n"
+        "    *out_gen = (__u32)bpf_ktime_get_ns() | 1U;\n"
+        "    return 0;\n"
+        "}\n\n"
+        "static __always_inline int napt_create_preserved_mapping(\n"
+        "    __u8 proto, __be32 internal_addr, __be16 internal_port, __be32 remote_addr,\n"
+        "    __be16 remote_port, __be16 external_port, __u32 gen, __u8 allow_reuse) {\n"
+        "    struct napt_from_wan_value *slot = napt_wan_lookup(proto, external_port);\n"
+        "    struct napt_from_lan_value lan = {};\n\n"
+        "    if (!slot || slot->generation != 0xFFFFFFFFU) return -1;\n\n"
+        "    slot->internal_addr = internal_addr;\n"
+        "    slot->internal_port = internal_port;\n"
+        "    slot->allow_reuse = allow_reuse;\n"
+        "    slot->trigger_addr = remote_addr;\n"
+        "    slot->trigger_port = remote_port;\n"
+        "    slot->generation = gen;\n"
+        "    slot->state_ref = napt_state_make(NAPT_WAN_STATE_ACTIVE, 0);\n"
+        "    slot->kind = NAPT_MAPPING_DYNAMIC;\n\n"
+        "    lan.external_port = external_port;\n"
+        "    lan.kind = NAPT_MAPPING_DYNAMIC;\n"
+        "    lan.allow_reuse = allow_reuse;\n"
+        "    lan.generation = gen;\n"
+        "    lan.trigger_addr = remote_addr;\n"
+        "    lan.trigger_port = remote_port;\n\n"
+        "    if (napt_lan_insert(internal_addr, internal_port, proto, &lan) != 0) {\n"
+        "        napt_wan_clear(proto, external_port);\n"
+        "        return -1;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n\n"
+        "#define NAPT_IP_MULTICAST_MASK bpf_ntohl(0xF0000000)\n",
+    )
+    nat_packet2 = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h"
+    patch(
+        nat_packet2,
+        "        if (napt_queue_pop(proto, &external_port, &gen) != 0) return TC_ACT_SHOT;\n",
+        "        __u8 port_preserved = 0;\n"
+        "        if (land_nat_port_preserve &&\n"
+        "            (proto == IPV4_PROTO_TCP || proto == IPV4_PROTO_UDP) &&\n"
+        "            napt_try_preserve_port(proto, internal_port, &external_port, &gen) == 0) {\n"
+        "            port_preserved = 1;\n"
+        "        } else {\n"
+        "            int created = -1;\n"
+        "            /* A preserved port is still sitting in the queue; skip such\n"
+        "             * entries instead of failing the flow. */\n"
+        "#pragma unroll\n"
+        "            for (int attempt = 0; attempt < 8; attempt++) {\n"
+        "                if (napt_queue_pop(proto, &external_port, &gen) != 0) break;\n"
+        "                struct napt_from_wan_value *slot = napt_wan_lookup(proto, external_port);\n"
+        "                if (slot && slot->kind != NAPT_MAPPING_FREE) {\n"
+        "                    napt_queue_push(proto, external_port, gen);\n"
+        "                    continue;\n"
+        "                }\n"
+        "                created = napt_create_dynamic_mapping(proto, src_addr, internal_port, dst_addr,\n"
+        "                                                      remote_port, external_port, gen, allow_reuse);\n"
+        "                if (created == 0) break;\n"
+        "                napt_queue_push(proto, external_port, gen);\n"
+        "            }\n"
+        "            if (created != 0) return TC_ACT_SHOT;\n"
+        "        }\n"
+        "        if (port_preserved &&\n"
+        "            napt_create_preserved_mapping(proto, src_addr, internal_port, dst_addr, remote_port,\n"
+        "                                          external_port, gen, allow_reuse) != 0)\n"
+        "            return TC_ACT_SHOT;\n",
+    )
+    # The dynamic-create call moved into the retry loop above; drop the old
+    # single-shot block (brace matching, so upstream indentation can change).
+    drop_if_block(
+        nat_packet2,
+        "        if (napt_create_dynamic_mapping(proto, src_addr, internal_port, dst_addr,",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 

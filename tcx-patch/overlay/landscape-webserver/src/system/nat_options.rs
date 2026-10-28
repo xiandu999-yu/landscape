@@ -23,6 +23,8 @@ pub struct NatOptionsDto {
     pub udp_timeout_secs: u64,
     #[serde(default = "default_icmp")]
     pub icmp_timeout_secs: u64,
+    #[serde(default)]
+    pub port_preserve: bool,
 }
 
 fn default_tcp_syn() -> u64 {
@@ -50,6 +52,7 @@ impl Default for NatOptionsDto {
             udp_min_timeout_secs: default_udp_min(),
             udp_timeout_secs: default_udp(),
             icmp_timeout_secs: default_icmp(),
+            port_preserve: false,
         }
     }
 }

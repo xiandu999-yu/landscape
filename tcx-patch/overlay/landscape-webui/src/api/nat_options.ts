@@ -8,6 +8,8 @@ export interface NatOptions {
   udp_min_timeout_secs: number;
   udp_timeout_secs: number;
   icmp_timeout_secs: number;
+  /** Opt-in: keep the client's source port when possible. */
+  port_preserve?: boolean;
 }
 
 const natApi = applyInterceptors(

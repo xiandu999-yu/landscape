@@ -262,6 +262,18 @@ PUT /api/v1/system/nat/options
 | `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `600` | UDP 已见回包时的超时（QUIC/游戏建议 120 或更短） |
 | `LANDSCAPE_NAT_ICMP_TIMEOUT_SECS` | `60` | ICMP 超时 |
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
+| `LANDSCAPE_NAT_PORT_PRESERVE` | `0` | `1` 开启端口保持：优先用客户端原源端口（在 range 内且 WAN 槽空闲时），失败再走队列分配 |
+
+### 端口保持（opt-in）
+
+`LANDSCAPE_NAT_PORT_PRESERVE=1` 时，新流先尝试用客户端的原源端口：
+
+1. 端口必须落在该协议的 `tcp_range` / `udp_range` 内；
+2. 用 `generation` 上的 `0 -> 0xFFFFFFFF` CAS **原子占位**，避免两个 CPU 同时抢同一个端口；
+3. 占位成功后填 WAN 槽和 LAN 哈希；LAN 插入失败则 `napt_wan_clear()` 归还槽位；
+4. 原端口后面还会被队列 pop 到，创建路径会跳过 `kind != FREE` 的槽位（最多重试 8 次），不会把流量打失败。
+
+默认关闭；开启后需要重启 NAT 段（NAT 弹窗点「更新」）。
 
 注意：
 
