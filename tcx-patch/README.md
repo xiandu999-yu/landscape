@@ -245,6 +245,13 @@ UI 上超时字段用两列 `n-grid` 排布（每行两个），比原来五列�
 einat 的 `timeout_fragment = "5s"` 没有直接对应：Landscape 只用
 `napt_is_non_initial()` 识别非首片，不做 einat 那样的 frag 端口记忆。
 
+**补充（0.27.2 已有）**：`tc_nat4_v4.bpf.c` 里对 ICMP error 调用
+`napt_modify_icmp_error()`（翻译内嵌包），对非首片调用 `napt_modify_fragment()`，
+所以 traceroute/PMTU 和分片并不是缺失项；本补丁没有改动这两条路径。
+
+**RST 快速回收**：TCP RST 到达时直接把 CT 置为 RELEASE（定时器 1ns），
+端口立即走回收流程，不再等 120s 短超时。
+
 保存时前端会先 `PUT /api/v1/system/nat/options` 写 `$HOME/.landscape-router/nat-options.json`，
 再保存 WAN link；`landscape_ebpf::nat_options::reload()` 刷新缓存，下次 NAT attach 时生效。
 
@@ -303,6 +310,9 @@ bpftool map dump name napt_stats
 | 0 | `PORT_EXHAUSTED`：端口队列为空，新流分配不到外部端口 |
 | 1 | `METRIC_DROP`：指标 ringbuf 满，上报被丢弃（不再影响 CT 状态机） |
 | 2 | `PRESERVE_OK`：端口保持成功次数 |
+| 3 | `MAP_MISS`：WAN 入向找不到/不可用的映射 |
+| 4 | `REMOTE_DENIED`：EDF 模式下远端不在白名单 |
+| 5 | `CT_FULL`：`napt_ct` 满，新连接无法建 CT |
 
 计数是普通 `ARRAY`（失败路径上原子加），`bpftool` 直接按 key 显示。
 
@@ -312,6 +322,8 @@ bpftool map dump name napt_stats
 - **WAN 地址变化已自动处理**：nat4 section 的作用域是 `SectionScope::SessionAndLease`
   （`wan_link_service/mod.rs`），租约 v4 地址变化会重启 NAT 段并重新烘 rodata，
   DHCP 换地址不需要手工重启。
+- **没有外网入站需求时建议关掉 Full Cone**：EDF（默认）只允许 trigger 对端，
+  没有端口转发/P2P 入站需求时更安全；Full Cone 开着会接受任意远端主动连映射端口。
 - **内存占用**：`napt_from_wan` 是 ARRAY，3 × 65536 × 32B ≈ **6.3 MB/链路**；
   三个端口队列 3 × 65536 × 8B ≈ 1.5 MB；`napt_from_lan` / `napt_ct` 各 196608 条
   （`BPF_F_NO_PREALLOC`）。多 WAN 时线性增长，后续可考虑 HASH/索引表优化。

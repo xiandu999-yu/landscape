@@ -221,10 +221,13 @@ def main() -> None:
         '    NAPT_STAT_PORT_EXHAUSTED = 0,\n'
         '    NAPT_STAT_METRIC_DROP = 1,\n'
         '    NAPT_STAT_PRESERVE_OK = 2,\n'
+        '    NAPT_STAT_MAP_MISS = 3,\n'
+        '    NAPT_STAT_REMOTE_DENIED = 4,\n'
+        '    NAPT_STAT_CT_FULL = 5,\n'
         '};\n\n'
         'struct {\n'
         '    __uint(type, BPF_MAP_TYPE_ARRAY);\n'
-        '    __uint(max_entries, 4);\n'
+        '    __uint(max_entries, 8);\n'
         '    __type(key, __u32);\n'
         '    __type(value, __u64);\n'
         '} napt_stats SEC(".maps");\n\n'
@@ -332,6 +335,29 @@ def main() -> None:
         "                                      : NAPT_CT_REPORT_INTERVAL_NS;\n"
         "            napt_ct_timer_start(value, next_interval);\n"
         "        }\n",
+    )
+    #        RST: tear the flow down immediately (ports return via RELEASE).
+    patch(
+        nat_timer,
+        "            napt_ct_timer_start(value, next_interval);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    return TC_ACT_OK;\n"
+        "}\n",
+        "            napt_ct_timer_start(value, next_interval);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    if (l4_protocol == IPV4_PROTO_TCP && tcp_phase == NAPT_TCP_PHASE_RST) {\n"
+        "        __u64 cur = value->status;\n"
+        "        if ((cur == NAPT_CT_ACTIVE || cur == NAPT_CT_IDLE_1 || cur == NAPT_CT_IDLE_2) &&\n"
+        "            __sync_bool_compare_and_swap(&value->status, cur, NAPT_CT_RELEASE))\n"
+        "            napt_ct_timer_start(value, 1);\n"
+        "    }\n"
+        "\n"
+        "    return TC_ACT_OK;\n"
+        "}\n",
     )
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(
@@ -654,6 +680,32 @@ def main() -> None:
     drop_if_block(
         nat_packet2,
         "        if (napt_create_dynamic_mapping(proto, src_addr, internal_port, dst_addr,",
+    )
+    # 8b) failure counters on the WAN ingress path.
+    patch(
+        nat_packet2,
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC))\n"
+        "        return TC_ACT_SHOT;\n",
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC)) {\n"
+        "        napt_stat_inc(NAPT_STAT_MAP_MISS);\n"
+        "        return TC_ACT_SHOT;\n"
+        "    }\n",
+    )
+    patch(
+        nat_packet2,
+        "        if (!napt_dynamic_remote_allowed(mapping, src_addr, remote_port, proto)) return TC_ACT_SHOT;\n",
+        "        if (!napt_dynamic_remote_allowed(mapping, src_addr, remote_port, proto)) {\n"
+        "            napt_stat_inc(NAPT_STAT_REMOTE_DENIED);\n"
+        "            return TC_ACT_SHOT;\n"
+        "        }\n",
+    )
+    patch(
+        nat_packet2,
+        "        if (!ct) return TC_ACT_SHOT;\n",
+        "        if (!ct) {\n"
+        "            napt_stat_inc(NAPT_STAT_CT_FULL);\n"
+        "            return TC_ACT_SHOT;\n"
+        "        }\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
