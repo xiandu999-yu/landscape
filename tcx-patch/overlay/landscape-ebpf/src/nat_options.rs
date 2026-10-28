@@ -151,7 +151,19 @@ impl NatOptions {
         // Env overrides (scripted setups / one-off debugging).
         opts.full_cone = env_bool("LANDSCAPE_NAT_FULL_CONE", opts.full_cone);
         opts.port_preserve = env_bool("LANDSCAPE_NAT_PORT_PRESERVE", opts.port_preserve);
-        opts.event_driven = env_bool("LANDSCAPE_NAT_EVENT_DRIVEN", opts.event_driven);
+        // An explicit LANDSCAPE_NAT_EVENT_DRIVEN wins over the metric-mode
+        // fallback below: it lets an init script pick the timer model without
+        // editing landscape.toml (event mode keeps the NAT-session page empty
+        // for active flows because it never emits periodic ACTIVE reports).
+        let event_driven_env = std::env::var("LANDSCAPE_NAT_EVENT_DRIVEN").ok().map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "on" | "yes"
+            )
+        });
+        if let Some(v) = event_driven_env {
+            opts.event_driven = v;
+        }
         opts.tcp_syn_timeout_ns =
             secs(env_u64("LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS", opts.tcp_syn_timeout_ns / NS),
                  opts.tcp_syn_timeout_ns);
@@ -173,8 +185,9 @@ impl NatOptions {
 
         // Metric mode drives the timer model: an enabled metric service needs
         // periodic 5s reporting, so fall back from event-driven mode. Only a
-        // literal `[metric] mode = "off"` keeps event-driven timers.
-        if !metric_mode_off() {
+        // literal `[metric] mode = "off"` (or an explicit env override) keeps
+        // event-driven timers.
+        if !metric_mode_off() && event_driven_env.is_none() {
             opts.event_driven = false;
             opts.report_interval_ns = 5 * NS;
         }

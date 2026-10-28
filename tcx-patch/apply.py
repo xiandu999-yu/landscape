@@ -224,6 +224,7 @@ def main() -> None:
         '    NAPT_STAT_MAP_MISS = 3,\n'
         '    NAPT_STAT_REMOTE_DENIED = 4,\n'
         '    NAPT_STAT_CT_FULL = 5,\n'
+        '    NAPT_STAT_CT_BUSY = 6,\n'
         '};\n\n'
         'struct {\n'
         '    __uint(type, BPF_MAP_TYPE_ARRAY);\n'
@@ -272,23 +273,11 @@ def main() -> None:
         "    if (key->proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n\n"
         "    if (key->proto == IPV4_PROTO_TCP) {\n",
     )
-    #        TCP: only a fully established flow (both directions carried data)
-    #        keeps the long idle timeout; SYN/FIN/RST are transitory.
-    patch(
-        nat_timer,
-        "    if (key->proto == IPV4_PROTO_TCP) {\n"
-        "        if (value->client_status == NAPT_TCP_STATE_SYN &&\n"
-        "            value->server_status == NAPT_TCP_STATE_SYN)\n"
-        "            return NAPT_TCP_TIMEOUT_NS;\n"
-        "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
-        "    }\n",
-        "    if (key->proto == IPV4_PROTO_TCP) {\n"
-        "        if (value->client_status == NAPT_TCP_STATE_LESS_EST &&\n"
-        "            value->server_status == NAPT_TCP_STATE_LESS_EST)\n"
-        "            return NAPT_TCP_TIMEOUT_NS;\n"
-        "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
-        "    }\n",
-    )
+    #        NOTE: the TCP branch of napt_ct_wait_ns() is intentionally left at
+    #        the upstream SYN/SYN test.  napt_ct_advance_pkt() only ever moves a
+    #        TCP CT to SYN/FIN/INIT (data packets never set LESS_EST), so an
+    #        "established == both LESS_EST" test would be dead code and every
+    #        TCP flow would fall back to the 120s half-open timeout.
     #        shared timeout selector (used by the packet path in event-driven mode)
     patch(
         nat_timer,
@@ -301,8 +290,8 @@ def main() -> None:
         "    }\n"
         "    if (proto == IPV4_PROTO_ICMP) return NAPT_ICMP_TIMEOUT_NS;\n"
         "    if (proto == IPV4_PROTO_TCP) {\n"
-        "        if (value->client_status == NAPT_TCP_STATE_LESS_EST &&\n"
-        "            value->server_status == NAPT_TCP_STATE_LESS_EST)\n"
+        "        if (value->client_status == NAPT_TCP_STATE_SYN &&\n"
+        "            value->server_status == NAPT_TCP_STATE_SYN)\n"
         "            return NAPT_TCP_TIMEOUT_NS;\n"
         "        return NAPT_TCP_SYN_TIMEOUT_NS;\n"
         "    }\n"
@@ -310,20 +299,23 @@ def main() -> None:
         "}\n\n"
         "static __always_inline __u64 napt_ct_wait_ns(const struct napt_ct_key *key,\n",
     )
-    #        event-driven mode: arm the timer with the idle timeout on every
-    #        packet, and on expiry jump straight to RELEASE (port return).
+    #        event-driven mode: the timer is armed with the flow's idle timeout
+    #        and refreshed from the packet path (6e). When it fires while the CT
+    #        is still ACTIVE the flow is genuinely idle, so release it in this
+    #        same callback. (The old code re-armed a 1ns timer and released on
+    #        the second pass; that pass raced with a packet that had just
+    #        refreshed the CT and could kill a live flow.)
     patch(
         nat_timer,
-        "    /* Metrics are advisory: a full/lagging ringbuf or metric mode=off must\n",
-        "    if (land_nat_event_driven && current < NAPT_CT_RELEASE) {\n"
+        "    if (current == NAPT_CT_RELEASE) {\n",
+        "    if (land_nat_event_driven && current == NAPT_CT_ACTIVE) {\n"
         "        if (!__sync_bool_compare_and_swap(&value->status, current, NAPT_CT_RELEASE)) {\n"
         "            *next_timeout = NAPT_CT_REPORT_INTERVAL_NS;\n"
         "            return NAPT_TIMER_STEP_RESTART;\n"
         "        }\n"
-        "        *next_timeout = 1;\n"
-        "        return NAPT_TIMER_STEP_RESTART;\n"
+        "        current = NAPT_CT_RELEASE;\n"
         "    }\n\n"
-        "    /* Metrics are advisory: a full/lagging ringbuf or metric mode=off must\n",
+        "    if (current == NAPT_CT_RELEASE) {\n",
     )
     #        packet path: in event-driven mode re-arm with the flow's idle timeout
     patch(
@@ -358,6 +350,39 @@ def main() -> None:
         "\n"
         "    return TC_ACT_OK;\n"
         "}\n",
+    )
+    #        packet path: refresh the idle timer on every packet in event-driven
+    #        mode. einat does exactly this from ct_state_transition() by calling
+    #        ct_reset_timer() on each packet. Without it the timer keeps the
+    #        interval armed at activation time -- before the first reply -- so a
+    #        busy UDP flow was torn down after udp_min (120s) and came back with
+    #        a brand-new external port.
+    patch(
+        nat_timer,
+        "            napt_ct_timer_start(value, next_interval);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    if (l4_protocol == IPV4_PROTO_TCP && tcp_phase == NAPT_TCP_PHASE_RST) {\n",
+        "            napt_ct_timer_start(value, next_interval);\n"
+        "        }\n"
+        "    } else if (land_nat_event_driven && status == NAPT_CT_ACTIVE) {\n"
+        "        napt_ct_timer_start(value, napt_ct_timeout_for(l4_protocol, value));\n"
+        "    }\n"
+        "\n"
+        "    if (l4_protocol == IPV4_PROTO_TCP && tcp_phase == NAPT_TCP_PHASE_RST) {\n",
+    )
+    #        count packets that hit a CT which is still being torn down: the
+    #        recreate is then blocked by BPF_NOEXIST and the packet is dropped.
+    #        Increments while gaming mean the fail-closed teardown window is
+    #        being hit (see the UDP timer fix above).
+    patch(
+        nat_timer,
+        "    if (!napt_ct_status_usable(value->status)) return -1;\n",
+        "    if (!napt_ct_status_usable(value->status)) {\n"
+        "        napt_stat_inc(NAPT_STAT_CT_BUSY);\n"
+        "        return -1;\n"
+        "    }\n",
     )
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(

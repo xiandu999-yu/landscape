@@ -236,9 +236,12 @@ Full Cone (EIM/EIF)   [开关]     ← 默认开
 未见回包 → `UDP_MIN`（120s），见过回包 → `UDP`（600s）。与 einat 的
 `INIT_OUT/INIT_IN -> ESTABLISHED` 两段式等价。
 
-TCP 侧同理：只有 `client_status` 和 `server_status` 都是 `LESS_EST`（双向都传过数据）
-才用长超时；SYN、FIN、RST 这些过渡状态一律用 `TCP 半开超时`（120s），避免
-半开/已关闭连接占用 24h。
+TCP 侧**不套用**这个判定：`napt_ct_advance_pkt()` 对 TCP 只会写 `SYN/FIN/INIT`
+（数据包不写 `LESS_EST`），所以"双向 `LESS_EST` 才算已建立"是死代码。上游的
+`client_status == SYN && server_status == SYN`（握手完成）才是"已建立"，
+用长超时；SYN、FIN、RST 等过渡状态一律用 `TCP 半开超时`（120s），避免
+半开/已关闭连接占用 24h。**2026-10-29 已把早先误改的 `LESS_EST` 判定回退**，
+否则所有 TCP 流的空闲超时都会被压到 120s。
 
 UI 上超时字段用两列 `n-grid` 排布（每行两个），比原来五列竖排省一半高度。
 
@@ -277,7 +280,7 @@ PUT /api/v1/system/nat/options
 | `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
 | `LANDSCAPE_NAT_PORT_PRESERVE` | `0` | `1` 开启端口保持：优先用客户端原源端口（在 range 内且 WAN 槽空闲时），失败再走队列分配 |
 | `LANDSCAPE_NAT_REPORT_INTERVAL_SECS` | `30` | CT 定时器/指标上报周期（原 5s）。调大省 CPU、指标更粗；范围 1–3600 |
-| `LANDSCAPE_NAT_EVENT_DRIVEN` | `1` | `1`=事件驱动（无周期 tick）；`0`=周期上报模式。**metric 模式非 off 时强制 `0` + 5s** |
+| `LANDSCAPE_NAT_EVENT_DRIVEN` | `1` | `1`=事件驱动（无周期 tick）；`0`=周期上报模式。metric 模式非 off 时自动 `0` + 5s，但**显式设置本变量时以变量为准** |
 
 ### 端口保持（opt-in）
 
@@ -313,6 +316,7 @@ bpftool map dump name napt_stats
 | 3 | `MAP_MISS`：WAN 入向找不到/不可用的映射 |
 | 4 | `REMOTE_DENIED`：EDF 模式下远端不在白名单 |
 | 5 | `CT_FULL`：`napt_ct` 满，新连接无法建 CT |
+| 6 | `CT_BUSY`：报文命中的 CT 正在清理（旧 CT 没删完，重建被 `BPF_NOEXIST` 挡住 → 该包被丢） |
 
 计数是普通 `ARRAY`（失败路径上原子加），`bpftool` 直接按 key 显示。
 
@@ -337,12 +341,57 @@ bpftool map dump name napt_stats
     `[metric] mode`。只要不是 `off`（含缺省 `persistent`），就自动
     `event_driven=false` + `report_interval=5s`，保证活跃连接页面指标正常；
     只有 `mode = "off"` 才保持事件驱动。
+  - **显式 env 优先**（2026-10-29 起）：手动设了 `LANDSCAPE_NAT_EVENT_DRIVEN=1/0` 时
+    不再被上面的指标联动覆盖，方便 init 脚本做 A/B。注意 event 模式不会周期性上报
+    ACTIVE，NAT 会话页看不到活跃流（只有删除事件）。
   - 需要实时指标又想要事件驱动，属于矛盾需求；二选一。
 - **TCP 空闲 24h 的代价（仅周期模式）**：`EVENT_DRIVEN=0` 时每个 ACTIVE CT 仍按
   `report_interval`（默认 **30s**，原 5s）跑一次 `bpf_timer`；调大间隔可成比例减少唤醒。
 
+### UDP 周期性卡顿 / 换端口修复（2026-10-29）
+
+**现象**：游戏 UDP 每 ~2 分钟换一次公网端口，换的瞬间约 0.6s 全丢包，
+表现为周期性卡顿、人物瞬移、语音断续。
+
+**根因**（事件驱动模式）：
+
+1. `napt_ct_advance_pkt()` 只在 `napt_ct_status_can_activate()` 为真（CT 还不是 ACTIVE）
+   时才 `bpf_timer_start()`。UDP 首包激活时 `server_status` 还是 INIT，定时器被打成
+   `udp_min`（120s）；回包后 CT 进入 ACTIVE，之后**每个报文都不再续期**，所以
+   `udp`（600s）这一档永远不生效——活跃流也会在 120s 到点被拆。
+2. 到期后走 `RELEASE → 清 LAN 表 → 清 WAN 槽 → 还端口`（分步 100ms/500ms）。
+   这期间 `napt_ct_status_usable()` 为假 → `napt_ct_resolve()` 失败；重建又因
+   `BPF_NOEXIST` 撞上还没删完的旧 CT → `TC_ACT_SHOT`，即 ~0.6s 的 fail-closed 黑洞。
+3. 旧代码"到期先转 RELEASE 再 arm 1ns 二次回调"还有竞态：报文在两次回调之间
+   把 CT 刷新回 ACTIVE 后，第二次回调会把这个刚救活的流再拆掉。
+
+**修复**（对齐 einat 的 `ct_state_transition() -> ct_reset_timer()`）：
+
+- 事件驱动模式下**每个报文**都 `napt_ct_timer_start(value, napt_ct_timeout_for(...))`，
+  空闲超时从最后一次报文起算，600s 两段式真正生效；
+- 到期时在**同一个** timer 回调里 `ACTIVE → RELEASE` 并继续清理，不再用 1ns 二次回调；
+- 回退 TCP 的 `LESS_EST` 判定（见上一节）。
+
+**注**：清理窗口本身仍是分步的，真正的空闲超时（例如 UDP 2 分钟没包）之后
+仍会有一次短暂重建 + 换端口，这是 NAT 的正常行为；本修复消除的是
+"**活跃流也被 120s 强拆**"。
+
+**验证**：
+
+```sh
+# 事件驱动模式下，活跃 UDP 流的 external_port 应长期不变
+bpftool map dump name napt_from_lan | grep -A6 '<内网端口>'
+# CT 数量与失败计数
+bpftool map dump name napt_stats
+```
+
 ## 已知限制 / 下一步
 
+- **端口保持（`port_preserve`）会向队列塞重复项**：保留端口时只做了 WAN 槽 CAS 占位，
+  没有把该端口从 `napt_udp_ports`/`napt_tcp_ports` 队列里摘掉；释放时又 `push` 一次，
+  同一端口在队列里出现两份。后续 pop 到重复项会走"跳过并重试"分支（不会串流），
+  但队列会缓慢膨胀，最终 `push` 失败导致 CT 卡在 `PUSH_QUEUE`、端口泄漏。
+  该功能默认关闭，开启前需先修这个队列一致性问题。
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。
 - `LANDSCAPE_TCX_ORDER=position` 依赖 `bpf_prog_query` 返回的链序；若内核/权限
   不允许查询，会退化为追加。
