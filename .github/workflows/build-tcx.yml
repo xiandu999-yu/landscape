@@ -260,3 +260,79 @@ jobs:
             src/output/landscape-webserver-${{ matrix.arch }}-static
             src/output/redirect_pkg_handler-${{ matrix.arch }}-static
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # WebUI static assets (Vue). Independent of the TCX patch: the same v0.27.2
+  # frontend is produced, packaged as static.zip for /mnt/emmc/.landscape-router/static.
+  # ---------------------------------------------------------------------------
+  webui:
+    name: webui static
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: webui-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            webui-${{ inputs.baseline }}-
+
+      - name: Setup Node and pnpm
+        run: |
+          set -euo pipefail
+          node --version
+          npm install -g pnpm@12.6.0
+          pnpm --version
+
+      - name: Install JS dependencies
+        working-directory: src
+        run: pnpm install --frozen-lockfile
+
+      - name: Export OpenAPI and generate TS bindings
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo test -p landscape-webserver export_openapi_json -- --nocapture
+          pnpm --filter @landscape-router/types generate
+
+      - name: Build webui
+        working-directory: src
+        run: pnpm --filter landscape-webui build
+
+      - name: Package static assets
+        working-directory: src
+        run: |
+          set -euo pipefail
+          rm -rf output/static
+          mkdir -p output/static/scalar
+          cp -r landscape-webui/dist/. output/static/
+          cp node_modules/@scalar/api-reference/dist/browser/standalone.js output/static/scalar/
+          cp node_modules/@scalar/api-reference/dist/style.css output/static/scalar/
+          ( cd output && zip -qr ../landscape-webui-static.zip static )
+          ls -lh landscape-webui-static.zip
+
+      - name: Upload webui static
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-webui-static
+          path: src/landscape-webui-static.zip
+          if-no-files-found: error
