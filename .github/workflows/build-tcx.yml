@@ -1,0 +1,126 @@
+name: build-tcx
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Upstream landscape ref to patch"
+        required: true
+        default: "v0.27.2"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            host: ubuntu-24.04
+          - arch: aarch64
+            host: ubuntu-24.04-arm
+    runs-on: ${{ matrix.host }}
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Show patch repo layout
+        run: |
+          set -euo pipefail
+          echo "---- files under patch/ ----"
+          find patch -maxdepth 4 -type f -not -path 'patch/.git/*' | sort | sed 's/^/  /'
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            echo "expected layout: tcx-patch/apply.py + tcx-patch/overlay/..."
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-ebpf/src/tcx.rs || {
+            echo "::error::src/landscape-ebpf/src/tcx.rs missing (overlay not copied)"
+            exit 1
+          }
+          grep -q 'attached TC hook via TCX' src/landscape-ebpf/src/landscape.rs || {
+            echo "::error::landscape.rs was not overlaid with the TCX-aware TcHookProxy"
+            exit 1
+          }
+          grep -q 'pub mod tcx;' src/landscape-ebpf/src/lib.rs || {
+            echo "::error::lib.rs was not patched with 'pub mod tcx;'"
+            exit 1
+          }
+
+      - name: Show overlay changes
+        run: |
+          set -euo pipefail
+          git -C src status --short
+          git -C src diff --stat
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: tcx-${{ matrix.arch }}-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            tcx-${{ matrix.arch }}-${{ inputs.baseline }}-
+
+      - name: Build landscape-webserver and redirect_pkg_handler
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --features metric-persistent
+          cargo build --locked --release -p landscape-ebpf --bin redirect_pkg_handler
+          mkdir -p ../out
+          cp target/release/landscape-webserver "../out/landscape-webserver-${{ matrix.arch }}-tcx"
+          cp target/release/redirect_pkg_handler "../out/redirect_pkg_handler-${{ matrix.arch }}-tcx"
+          ls -l ../out
+
+      - name: Smoke test (non-root checks only)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ../out/landscape-webserver-${{ matrix.arch }}-tcx --version || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-tcx-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
