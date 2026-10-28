@@ -208,7 +208,10 @@ jobs:
           command -v zig
           zig version
           cargo install --locked cargo-zigbuild
-          cargo zigbuild --version
+          command -v cargo-zigbuild
+          # NOTE: `cargo zigbuild --version` is parsed by the subcommand, which
+          # only accepts `--verbose`; verify the dispatch with --help instead.
+          cargo zigbuild --help >/dev/null
 
       - name: Cache cargo registry and target
         uses: actions/cache@v5
