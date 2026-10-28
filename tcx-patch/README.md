@@ -269,7 +269,9 @@ PUT /api/v1/system/nat/options
 `LANDSCAPE_NAT_PORT_PRESERVE=1` 时，新流先尝试用客户端的原源端口：
 
 1. 端口必须落在该协议的 `tcp_range` / `udp_range` 内；
-2. 用 `generation` 上的 `0 -> 0xFFFFFFFF` CAS **原子占位**，避免两个 CPU 同时抢同一个端口；
+2. 用 `state_ref` 上的 **`0 → 0xFFFFFFFFFFFFFFFF` 64 位 CAS 原子占位**
+   （BPF 后端不支持 32 位 cmpxchg）；`napt_wan_clear()` 会把整槽清零，所以这个
+   CAS 只会成功一次，避免两个 CPU 同时抢同一个端口；
 3. 占位成功后填 WAN 槽和 LAN 哈希；LAN 插入失败则 `napt_wan_clear()` 归还槽位；
 4. 原端口后面还会被队列 pop 到，创建路径会跳过 `kind != FREE` 的槽位（最多重试 8 次），不会把流量打失败。
 
