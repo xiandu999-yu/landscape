@@ -306,6 +306,10 @@ jobs:
             echo "::error::LAN modal was not patched"; exit 1; }
           grep -q 'tcx_order' src/landscape-webserver/src/system/config.rs || {
             echo "::error::backend routes not patched"; exit 1; }
+          grep -q 'tcp_syn_timeout_secs' src/landscape-webui/src/components/nat/NATEditModal.vue || {
+            echo "::error::NAT modal timeout inputs not patched"; exit 1; }
+          grep -q 'nat_options' src/landscape-webui/src/components/nat/NATEditModal.vue || {
+            echo "::error::NAT modal nat_options wiring missing"; exit 1; }
 
       - name: Install build toolchain
         working-directory: src
@@ -359,8 +363,14 @@ jobs:
             find landscape-webui/dist -type f | head -n 20
             exit 1
           fi
+          if ! grep -Rql "tcp_syn_timeout_secs" landscape-webui/dist; then
+            echo "::error::the built bundle has no NAT timeout inputs (nat_options) — NAT modal not patched"
+            exit 1
+          fi
           echo "TCX editor present in:"
           grep -Rl "tcx/order" landscape-webui/dist | head -n 5
+          echo "NAT options present in:"
+          grep -Rl "tcp_syn_timeout_secs" landscape-webui/dist | head -n 5
 
       - name: Package static assets
         working-directory: src
