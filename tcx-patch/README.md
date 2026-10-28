@@ -288,6 +288,38 @@ NAT 弹窗里新增 **「端口保持 (Port Preserve)」** 开关（默认关）
 
 默认关闭；开启后需要重启 NAT 段（NAT 弹窗点「更新」）。
 
+### 失败计数（bpftool 可读）
+
+`nat_v4` 新增了一个 per-CPU 计数 map `napt_stats`，不用重启、随时可读：
+
+```sh
+bpftool map dump name napt_stats
+```
+
+| 下标 | 含义 |
+|---|---|
+| 0 | `PORT_EXHAUSTED`：端口队列为空，新流分配不到外部端口 |
+| 1 | `METRIC_DROP`：指标 ringbuf 满，上报被丢弃（不再影响 CT 状态机） |
+| 2 | `PRESERVE_OK`：端口保持成功次数 |
+
+计数是普通 `ARRAY`（失败路径上原子加），`bpftool` 直接按 key 显示。
+
+### 监控分析里的 NAT 状态卡片
+
+**监控分析 → 活跃连接** 页面顶部新增「NAT 运行状态（nat_v4）」卡片：
+
+| 指标 | 含义 |
+|---|---|
+| 端口耗尽 | 新流分不到外部端口（`napt_stats[0]`） |
+| 指标丢弃 | 指标 ringbuf 满（`napt_stats[1]`） |
+| 端口保持成功 | `napt_stats[2]` |
+| CT 上限 | `napt_ct` 的 `max_entries` |
+
+- 每 5 秒自动刷新，也可点「刷新」；
+- 数据来源：webserver 调用 `bpftool -j map dump name napt_stats`（OpenWrt 自带），
+  不依赖 map pin；
+- NAT 未启用时显示「NAT 计数不可用」。
+
 注意：
 
 - **WAN 地址变化已自动处理**：nat4 section 的作用域是 `SectionScope::SessionAndLease`

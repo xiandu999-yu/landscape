@@ -209,7 +209,29 @@ def main() -> None:
         "    /* Metrics are advisory: a full/lagging ringbuf or metric mode=off must\n"
         "     * never freeze the CT state machine, otherwise entries never reach\n"
         "     * RELEASE and external ports are never recycled. */\n"
-        "    (void)napt_metric_try_report(key, value, NAPT_METRIC_ACTIVE);\n",
+        "    if (napt_metric_try_report(key, value, NAPT_METRIC_ACTIVE))\n"
+        "        napt_stat_inc(NAPT_STAT_METRIC_DROP);\n",
+    )
+    #        small per-CPU counters for the failure paths (read with bpftool)
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_map.h",
+        '} napt_icmp_ids SEC(".maps");\n',
+        '} napt_icmp_ids SEC(".maps");\n\n'
+        'enum napt_stat_idx {\n'
+        '    NAPT_STAT_PORT_EXHAUSTED = 0,\n'
+        '    NAPT_STAT_METRIC_DROP = 1,\n'
+        '    NAPT_STAT_PRESERVE_OK = 2,\n'
+        '};\n\n'
+        'struct {\n'
+        '    __uint(type, BPF_MAP_TYPE_ARRAY);\n'
+        '    __uint(max_entries, 4);\n'
+        '    __type(key, __u32);\n'
+        '    __type(value, __u64);\n'
+        '} napt_stats SEC(".maps");\n\n'
+        'static __always_inline void napt_stat_inc(__u32 idx) {\n'
+        '    __u64 *slot = bpf_map_lookup_elem(&napt_stats, &idx);\n'
+        '    if (slot) __sync_fetch_and_add(slot, 1);\n'
+        '}\n',
     )
     #    6b) timeouts become rodata-driven, defaulting to einat's NAT timers:
     #        tcp_trans=2m, tcp_est=24h, udp_default=10m, icmp=1m.
@@ -499,6 +521,7 @@ def main() -> None:
         "        return -1;\n\n"
         "    *out_port = internal_port;\n"
         "    *out_gen = (__u32)bpf_ktime_get_ns() | 1U;\n"
+        "    napt_stat_inc(NAPT_STAT_PRESERVE_OK);\n"
         "    return 0;\n"
         "}\n\n"
         "static __always_inline int napt_create_preserved_mapping(\n"
@@ -555,7 +578,10 @@ def main() -> None:
         "                if (created == 0) break;\n"
         "                napt_queue_push(proto, external_port, gen);\n"
         "            }\n"
-        "            if (created != 0) return TC_ACT_SHOT;\n"
+        "            if (created != 0) {\n"
+        "                napt_stat_inc(NAPT_STAT_PORT_EXHAUSTED);\n"
+        "                return TC_ACT_SHOT;\n"
+        "            }\n"
         "        }\n"
         "        if (port_preserved &&\n"
         "            napt_create_preserved_mapping(proto, src_addr, internal_port, dst_addr, remote_port,\n"
@@ -568,6 +594,34 @@ def main() -> None:
         nat_packet2,
         "        if (napt_create_dynamic_mapping(proto, src_addr, internal_port, dst_addr,",
     )
+    # 9) NAT monitor card under 监控分析 -> 活跃连接.
+    patch(
+        "landscape-webserver/src/system/mod.rs",
+        "pub mod nat_options;\n",
+        "pub mod nat_options;\npub mod nat_monitor;\n",
+    )
+    patch(
+        "landscape-webserver/src/system/config.rs",
+        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n",
+        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n"
+        "        .routes(routes!(super::nat_monitor::get_nat_monitor))\n",
+    )
+    live_metric = "landscape-webui/src/views/metric/conn/LiveMetric.vue"
+    patch(
+        live_metric,
+        'import ConnectViewSwitcher from "@/components/metric/connect/ConnectViewSwitcher.vue";\n',
+        'import ConnectViewSwitcher from "@/components/metric/connect/ConnectViewSwitcher.vue";\n'
+        'import NatMonitorCard from "@/components/nat/NatMonitorCard.vue";\n',
+    )
+    patch(
+        live_metric,
+        '  <n-flex vertical style="flex: 1; overflow: hidden">\n'
+        "    <!-- System-wide active connection stats -->\n",
+        '  <n-flex vertical style="flex: 1; overflow: hidden">\n'
+        "    <NatMonitorCard />\n"
+        "    <!-- System-wide active connection stats -->\n",
+    )
+
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
