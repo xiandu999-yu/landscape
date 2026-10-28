@@ -193,6 +193,56 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 空串表示继承全局。环境变量 `LANDSCAPE_TCX_IFACE_ORDER` 仍然优先于这个文件（WebUI 适合
 不设 env 的场景）。
 
+## Landscape 自身 NAT4 的优化（nat_v4）
+
+本补丁同时修正/优化 Landscape 自己的 NAPT44（`landscape-ebpf/src/bpf/nat_v4/`）：
+
+| 问题 | 修复 |
+|---|---|
+| **P0**：`nat_metric_events` ringbuf 满/无消费者（metric=off、DB 写慢）时，`napt_metric_try_report()` 失败会让 CT 状态机 `return RESTART`，永远停在 ACTIVE → 不超时、端口不回收、`napt_ct` 涨满后新连接静默丢 | 上报改为“尽力而为”：失败不再阻塞状态推进 |
+| 端口分配可预测（队列按 1024…65535 顺序 pop，外部端口基本递增） | 启动时用 xorshift+时间/PID 种子打乱端口入队顺序（Fisher-Yates） |
+| CT 超时写死 6s / 10min / 5min | 改为 rodata 可调，默认值不变 |
+| Full cone 依赖流控 `allow_reuse_port` 标记，默认是 EDF | 新增 **WebUI 开关**（NAT 服务弹窗），默认开启 EIM+EIF（full cone） |
+
+### Full Cone 开关在哪里
+
+拓扑 → 点 WAN 接口 → **NAT 服务** 弹窗，在三个端口段下面：
+
+```
+TCP 端口段
+UDP 端口段
+ICMP ID 段
+Full Cone (EIM/EIF)   [开关]     ← 新增，默认开
+[更新]
+```
+
+保存时前端会先 `PUT /api/v1/system/nat/options` 写 `$HOME/.landscape-router/nat-options.json`，
+再保存 WAN link；`landscape_ebpf::nat_options::reload()` 刷新缓存，下次 NAT attach 时生效。
+
+API：
+
+```
+GET /api/v1/system/nat/options
+PUT /api/v1/system/nat/options
+   { "full_cone": true, "tcp_syn_timeout_secs": 6,
+     "tcp_timeout_secs": 600, "udp_timeout_secs": 300 }
+```
+
+环境变量（优先级高于 JSON，方便脚本/调试）：
+
+| 变量 | 默认 | 作用 |
+|---|---|---|
+| `LANDSCAPE_NAT_TCP_SYN_TIMEOUT_SECS` | `6` | TCP 半开超时 |
+| `LANDSCAPE_NAT_TCP_TIMEOUT_SECS` | `600` | TCP 已建立空闲超时 |
+| `LANDSCAPE_NAT_UDP_TIMEOUT_SECS` | `300` | UDP/ICMP 超时（QUIC/游戏建议 120 或更短） |
+| `LANDSCAPE_NAT_FULL_CONE` | 取 JSON/默认(1) | `0` 关闭 full cone，退回“只允许 trigger 对端”的 EDF |
+
+注意：
+
+- 超时/ full cone 的 rodata 在 **NAT 段 attach 时**写入（`stages/nat4.rs`），改了要重启 **WAN 链路服务**（或整个 Landscape）；
+- XDP NAT 路径复用 TC 的 conntrack，但超时/ full cone 的 rodata 只对 TC 数据面设置，XDP 路径仍用 C 默认值（当前 `xdp:` 为空，不影响）；
+- 以上改动只针对 **IPv4 NAT**；NAT6 的对应优化未包含。
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。
@@ -200,3 +250,5 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
   不允许查询，会退化为追加。
 - 与 einat 的 ingress 兼容问题（0.27.x 按目的地址分发、einat 提前改写 dst）
   是独立问题，TCX 不能替代 ifindex 兜底补丁。
+- NAT 侧仍缺：LRU/水位告警（`napt_ct` 满了仍然 fail-closed）、ALG（FTP/SIP）、
+  NAT64、hairpin、每连接 timer 的 CPU 开销。
