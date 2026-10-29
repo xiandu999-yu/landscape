@@ -920,7 +920,25 @@ def main() -> None:
         '#include "reader/tc_nat_read4.h"\n#include "nat_v4/tc_nat4_packet.h"\n',
         '#include "reader/tc_nat_read4.h"\n'
         '#include "nat_v4/nat_fast.h"\n'
+        '#define LAND_NAT_FAST 1\n'
         '#include "nat_v4/tc_nat4_packet.h"\n',
+    )
+    # Every CT teardown drops the matching fast-path entry; otherwise the table
+    # only shrinks when a packet happens to hit an expired key, and ended flows
+    # (especially the router's own short-lived DNS/UDP flows) leak entries.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/nat4_ct_timer.h",
+        "static __always_inline u32 napt_ct_delete(struct napt_ct_key *key) {\n"
+        "    bpf_map_delete_elem(&napt_ct, key);\n"
+        "    return NAPT_TIMER_STEP_DELETE_CT;\n"
+        "}\n",
+        "static __always_inline u32 napt_ct_delete(struct napt_ct_key *key) {\n"
+        "    bpf_map_delete_elem(&napt_ct, key);\n"
+        "#ifdef LAND_NAT_FAST\n"
+        "    bpf_map_delete_elem(&fa4_fast, key);\n"
+        "#endif\n"
+        "    return NAPT_TIMER_STEP_DELETE_CT;\n"
+        "}\n",
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",

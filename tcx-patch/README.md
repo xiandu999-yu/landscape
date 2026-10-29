@@ -456,7 +456,9 @@ bpftool net show dev wan0
   CT 状态机）；
 - 只作用于 **出向**（LAN→WAN），入向仍然是完整链；
 - **不做网卡防火墙/黑名单检查**：命中 fast path 的包跳过 firewall stage；
-- CT 被删除（空闲超时、flush）后，残留条目最多再活 5 秒；
+- CT 被删除（空闲超时、flush）时，同 key 的 fast 条目在 `napt_ct_delete()` 里一起删掉
+  （`#ifdef LAND_NAT_FAST`，只在 TC 对象里生效）；理论上仍然残留的只有 XDP NAT 创建的 CT
+  （本机没开 XDP，不受影响），以及 5 秒内还没被任何包命中的条目；
 - 不走 landscape 自己 eBPF 封装的 PPPoE 链路（eth 头/出口封装由 exit stage 完成，跳过会发错帧）。
 
 验证：
