@@ -435,6 +435,38 @@ bpftool net show dev wan0
 # egress : land_wan_egress_route → egress_snat
 ```
 
+## 出向 NAT fast path（实验，`LANDSCAPE_NAT_FASTPATH=1`）
+
+类比 xt_FLOWOFFLOAD / SFE 的“首包建表、后续包直发”，但实现在 eBPF 里。
+
+- **记录**：`tc_v4_from_lan` 完成 NAT 改写后，把 `(内网 saddr/sport, 远端 daddr/dport, proto)`
+  → `(external_addr, external_port, deadline)` 写进 `fa4_fast`；
+- **命中**：`tc_wan_egress_route` 在 `tc_cb_forwarded` 分支里先查这张表，命中就直接
+  `napt_modify()` 改写 + 返回 `TC_ACT_OK`，**整条 egress 链（mss/firewall/nat/exit）都不走**；
+- **5 秒硬过期（不刷新）**：每条流每 5 秒至少有一个包走慢路径，顺带 `napt_ct_advance()`
+  续命 CT 并重新落表。这样 fast path 不需要碰 `napt_ct`，也不会让 CT 被提前释放；
+- **只在事件驱动模式记录**（`land_nat_event_driven_get()`）：周期模式下 CT 状态机需要逐包推进，
+  跳过会导致流被拆；
+- 表是 pinned map，`maps::nat::init_fa4_fast` 在任何程序加载前创建，NAT 与 egress route
+  两个对象各自 `pin_and_reuse_map`。
+
+限制（重要）：
+
+- 只处理 **IPv4、TCP/UDP、非分片、以太网封装**；TCP 的 SYN/FIN/RST 一律走慢路径（MSS 钳制、
+  CT 状态机）；
+- 只作用于 **出向**（LAN→WAN），入向仍然是完整链；
+- **不做网卡防火墙/黑名单检查**：命中 fast path 的包跳过 firewall stage；
+- CT 被删除（空闲超时、flush）后，残留条目最多再活 5 秒；
+- 不走 landscape 自己 eBPF 封装的 PPPoE 链路（eth 头/出口封装由 exit stage 完成，跳过会发错帧）。
+
+验证：
+
+```sh
+bpftool map dump name fa4_fast | head        # 有流量时能看到条目
+tc -s class ...                               # 不适用；看 napt_ct 计数或 CPU
+bpftool prog show | grep tc_wan_egress_route  # run_time 应下降
+```
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。

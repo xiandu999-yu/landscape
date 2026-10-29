@@ -903,6 +903,165 @@ def main() -> None:
         "            self.backbone.trie().del_ifindex(ifindex);\n"
         "        }\n",
     )
+
+    # 10) Egress NAT fast path (flow-offload style), opt-in via
+    #     LANDSCAPE_NAT_FASTPATH=1.  First packet records the NAT decision in
+    #     `fa4_fast`; later packets are matched in tc_wan_egress_route before
+    #     the chain tail call and skip the chain.  Entries carry a hard 5s
+    #     deadline (see nat_v4/nat_fast.h) so the CT stays alive.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h",
+        "const volatile __u16 land_nat_tcp_range_end = 0;\n",
+        "const volatile __u16 land_nat_tcp_range_end = 0;\n"
+        "const volatile __u8 land_nat_fastpath = 0;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        '#include "reader/tc_nat_read4.h"\n#include "nat_v4/tc_nat4_packet.h"\n',
+        '#include "reader/tc_nat_read4.h"\n'
+        '#include "nat_v4/nat_fast.h"\n'
+        '#include "nat_v4/tc_nat4_packet.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    if (rc == TC_ACT_SHOT) return TC_ACT_SHOT;\n"
+        "    if (rc != TC_ACT_OK) goto chain;\n"
+        "\n"
+        "chain:\n",
+        "    if (rc == TC_ACT_SHOT) return TC_ACT_SHOT;\n"
+        "    if (rc != TC_ACT_OK) goto chain;\n"
+        "\n"
+        "    if (land_nat_fastpath && land_nat_event_driven_get() &&\n"
+        "        view.l4_protocol != IPV4_PROTO_ICMP && !napt_is_icmp_error(&view) &&\n"
+        "        !napt_is_non_initial(&view)) {\n"
+        "        nat_fast_record(src_addr, view.sport, dst_addr, view.dport, view.l4_protocol,\n"
+        "                        new_addr, new_port);\n"
+        "    }\n"
+        "\n"
+        "chain:\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_egress_route.bpf.c",
+        '#include "chain/tc_cb.h"\n',
+        '#include "chain/tc_cb.h"\n'
+        '#include "nat_v4/nat_fast.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_egress_route.bpf.c",
+        "    if (tc_cb_forwarded(skb)) {\n"
+        "        u32 chain = tc_cb_chain(skb);\n"
+        "        bpf_tail_call(skb, &tc_wan_egress_roots, chain);\n",
+        "    if (tc_cb_forwarded(skb)) {\n"
+        "        // Fast path: an established flow skips the whole egress chain.\n"
+        "        if (nat_fast_try(skb, current_l3_offset)) return TC_ACT_OK;\n"
+        "        u32 chain = tc_cb_chain(skb);\n"
+        "        bpf_tail_call(skb, &tc_wan_egress_roots, chain);\n",
+    )
+    # Map plumbing: one pinned hash shared by the NAT stage and the egress route.
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub nat_metric_events: PathBuf,\n",
+        "    pub nat_metric_events: PathBuf,\n"
+        "    pub fa4_fast: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            nat_metric_events: root.join(nat::NAT_METRIC_EVENTS_PIN),\n",
+        "            nat_metric_events: root.join(nat::NAT_METRIC_EVENTS_PIN),\n"
+        "            fa4_fast: root.join(nat::FA4_FAST_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const NAT_METRIC_EVENTS_PIN: &str = "nat_metric_events";\n',
+        'pub(crate) const NAT_METRIC_EVENTS_PIN: &str = "nat_metric_events";\n'
+        'pub(crate) const FA4_FAST_PIN: &str = "fa4_fast";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `nat_metric_events` ringbuf at `path`.\n"
+        "pub fn init_nat_metric_events(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&NAT_METRIC_EVENTS_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `nat_metric_events` ringbuf at `path`.\n"
+        "pub fn init_nat_metric_events(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&NAT_METRIC_EVENTS_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `fa4_fast`: egress NAT fast-path table (key 16, value 16).\n"
+        "pub(crate) const FA4_FAST_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Hash,\n"
+        "    name: FA4_FAST_PIN,\n"
+        "    key_size: 16,\n"
+        "    value_size: 16,\n"
+        "    max_entries: 32768,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `fa4_fast` hash at `path`.\n"
+        "pub fn init_fa4_fast(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_nat_metric_events(&paths.nat_metric_events).expect("init nat_metric_events failed");\n',
+        '    nat::init_nat_metric_events(&paths.nat_metric_events).expect("init nat_metric_events failed");\n'
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("init fa4_fast failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_nat_metric_events(&paths.nat_metric_events).expect("test init nat_metric_events");\n',
+        '    nat::init_nat_metric_events(&paths.nat_metric_events).expect("test init nat_metric_events");\n'
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("test init fa4_fast");\n',
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "        rodata.land_nat_tcp_range_end = config.tcp_range.end;\n",
+        "        rodata.land_nat_tcp_range_end = config.tcp_range.end;\n"
+        "        let fastpath = std::env::var(\"LANDSCAPE_NAT_FASTPATH\")\n"
+        "            .map(|v| {\n"
+        "                matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "            })\n"
+        "            .unwrap_or(false);\n"
+        "        rodata.land_nat_fastpath = if fastpath { 1 } else { 0 };\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.nat_metric_events, &paths.nat_metric_events)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.nat_metric_events, &paths.nat_metric_events)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/xdp_wan_route.rs",
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
+        "        \"tc_wan_egress_route pin flow_match_map\"\n"
+        "    )?;\n",
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        "        \"tc_wan_egress_route pin fa4_fast\"\n"
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
+        "        \"tc_wan_egress_route pin flow_match_map\"\n"
+        "    )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/tc_wan_route.rs",
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
+        "        \"tc_wan_egress pin flow_match_map\"\n"
+        "    )?;\n",
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        "        \"tc_wan_egress pin fa4_fast\"\n"
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
+        "        \"tc_wan_egress pin flow_match_map\"\n"
+        "    )?;\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
