@@ -255,7 +255,7 @@ def main() -> None:
     patch(
         nat_timer,
         "#define NAPT_CT_REPORT_INTERVAL_NS (5ULL * NAPT_NSEC_PER_SEC)\n",
-        "#define NAPT_CT_REPORT_INTERVAL_NS land_nat_report_interval_ns\n",
+        "#define NAPT_CT_REPORT_INTERVAL_NS land_nat_report_interval_get()\n",
     )
     #        UDP becomes two-stage (einat style): short timeout until a reply
     #        is seen from the WAN side, then the long UDP timeout.
@@ -308,7 +308,15 @@ def main() -> None:
     patch(
         nat_timer,
         "    if (current == NAPT_CT_RELEASE) {\n",
-        "    if (land_nat_event_driven && current == NAPT_CT_ACTIVE) {\n"
+        "    if (land_nat_event_driven_get() && current == NAPT_CT_ACTIVE) {\n"
+        "        if (!value->pad1) {\n"
+        "            /* The tick that armed this timer was the periodic one, i.e. the\n"
+        "             * mode was switched to event-driven after this flow started.\n"
+        "             * Give it its idle timeout instead of tearing it down now. */\n"
+        "            value->pad1 = 1;\n"
+        "            *next_timeout = napt_ct_timeout_for(key->proto, value);\n"
+        "            return NAPT_TIMER_STEP_RESTART;\n"
+        "        }\n"
         "        if (!__sync_bool_compare_and_swap(&value->status, current, NAPT_CT_RELEASE)) {\n"
         "            *next_timeout = NAPT_CT_REPORT_INTERVAL_NS;\n"
         "            return NAPT_TIMER_STEP_RESTART;\n"
@@ -322,22 +330,31 @@ def main() -> None:
         nat_timer,
         "        if (prev == status) napt_ct_timer_start(value, NAPT_CT_REPORT_INTERVAL_NS);\n",
         "        if (prev == status) {\n"
-        "            __u64 next_interval = land_nat_event_driven\n"
+        "            __u64 next_interval = land_nat_event_driven_get()\n"
         "                                      ? napt_ct_timeout_for(l4_protocol, value)\n"
         "                                      : NAPT_CT_REPORT_INTERVAL_NS;\n"
         "            napt_ct_timer_start(value, next_interval);\n"
+        "            /* pad1 marks a timer armed with the flow's idle timeout (event\n"
+        "             * mode), so a later mode switch can tell it apart from a tick. */\n"
+        "            value->pad1 = land_nat_event_driven_get() ? 1 : 0;\n"
         "        }\n",
     )
     #        RST: tear the flow down immediately (ports return via RELEASE).
     patch(
         nat_timer,
         "            napt_ct_timer_start(value, next_interval);\n"
+        "            /* pad1 marks a timer armed with the flow's idle timeout (event\n"
+        "             * mode), so a later mode switch can tell it apart from a tick. */\n"
+        "            value->pad1 = land_nat_event_driven_get() ? 1 : 0;\n"
         "        }\n"
         "    }\n"
         "\n"
         "    return TC_ACT_OK;\n"
         "}\n",
         "            napt_ct_timer_start(value, next_interval);\n"
+        "            /* pad1 marks a timer armed with the flow's idle timeout (event\n"
+        "             * mode), so a later mode switch can tell it apart from a tick. */\n"
+        "            value->pad1 = land_nat_event_driven_get() ? 1 : 0;\n"
         "        }\n"
         "    }\n"
         "\n"
@@ -360,14 +377,21 @@ def main() -> None:
     patch(
         nat_timer,
         "            napt_ct_timer_start(value, next_interval);\n"
+        "            /* pad1 marks a timer armed with the flow's idle timeout (event\n"
+        "             * mode), so a later mode switch can tell it apart from a tick. */\n"
+        "            value->pad1 = land_nat_event_driven_get() ? 1 : 0;\n"
         "        }\n"
         "    }\n"
         "\n"
         "    if (l4_protocol == IPV4_PROTO_TCP && tcp_phase == NAPT_TCP_PHASE_RST) {\n",
         "            napt_ct_timer_start(value, next_interval);\n"
+        "            /* pad1 marks a timer armed with the flow's idle timeout (event\n"
+        "             * mode), so a later mode switch can tell it apart from a tick. */\n"
+        "            value->pad1 = land_nat_event_driven_get() ? 1 : 0;\n"
         "        }\n"
-        "    } else if (land_nat_event_driven && status == NAPT_CT_ACTIVE) {\n"
+        "    } else if (land_nat_event_driven_get() && status == NAPT_CT_ACTIVE) {\n"
         "        napt_ct_timer_start(value, napt_ct_timeout_for(l4_protocol, value));\n"
+        "        value->pad1 = 1;\n"
         "    }\n"
         "\n"
         "    if (l4_protocol == IPV4_PROTO_TCP && tcp_phase == NAPT_TCP_PHASE_RST) {\n",
@@ -387,6 +411,11 @@ def main() -> None:
     nat_rodata = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h"
     patch(
         nat_rodata,
+        "#include <vmlinux.h>\n",
+        "#include <vmlinux.h>\n#include <bpf/bpf_helpers.h>\n",
+    )
+    patch(
+        nat_rodata,
         "const volatile __u16 land_nat_tcp_range_end = 0;\n",
         "const volatile __u16 land_nat_tcp_range_end = 0;\n\n"
         "/* CT timeouts in nanoseconds (set from userspace). Defaults mirror\n"
@@ -401,7 +430,35 @@ def main() -> None:
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 1;\n\n"
         "/* 1 = event-driven CT timers (no periodic tick; metrics stop). */\n"
-        "const volatile __u8 land_nat_event_driven = 1;\n",
+        "const volatile __u8 land_nat_event_driven = 1;\n\n"
+        "/* Runtime-writable NAT knobs. Everything above lands in .rodata, which\n"
+        " * libbpf freezes at load; these two knobs live in a one-entry array so\n"
+        " * switching the metric mode (event-driven timers <-> periodic reporting)\n"
+        " * takes effect on the next timer tick without re-attaching the NAT\n"
+        " * segment. Userspace writes the struct; a zero interval or a missing\n"
+        " * entry falls back to the rodata defaults above. */\n"
+        "struct land_nat_dyn_cfg {\n"
+        "    __u64 report_interval_ns;\n"
+        "    __u8 event_driven;\n"
+        "    __u8 pad[7];\n"
+        "};\n\n"
+        "struct {\n"
+        "    __uint(type, BPF_MAP_TYPE_ARRAY);\n"
+        "    __uint(max_entries, 1);\n"
+        "    __type(key, __u32);\n"
+        "    __type(value, struct land_nat_dyn_cfg);\n"
+        "} land_nat_dyn SEC(\".maps\");\n\n"
+        "static __always_inline __u64 land_nat_report_interval_get(void) {\n"
+        "    __u32 key = 0;\n"
+        "    struct land_nat_dyn_cfg *cfg = bpf_map_lookup_elem(&land_nat_dyn, &key);\n"
+        "    if (cfg && cfg->report_interval_ns) return cfg->report_interval_ns;\n"
+        "    return land_nat_report_interval_ns;\n"
+        "}\n\n"
+        "static __always_inline int land_nat_event_driven_get(void) {\n"
+        "    __u32 key = 0;\n"
+        "    struct land_nat_dyn_cfg *cfg = bpf_map_lookup_elem(&land_nat_dyn, &key);\n"
+        "    return cfg ? cfg->event_driven : land_nat_event_driven;\n"
+        "}\n",
     )
     #    6c) full-cone by default: allow_reuse is OR-ed with the rodata switch.
     nat_packet = "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h"
@@ -467,6 +524,49 @@ def main() -> None:
         "            report_interval_ns = nat_opts.report_interval_ns,\n"
         "            \"nat4 runtime options\"\n"
         "        );\n",
+    )
+    #    6e) make the timer model runtime-tunable: bind the writable
+    #        `land_nat_dyn` map after load and push the current options into it,
+    #        so a metric-mode switch does not need a NAT re-attach.
+    patch(
+        nat_rs,
+        '    let tc_skel = bpf_ctx!(open.load(), "load tc_nat4_v4 skeleton")?;\n',
+        '    let tc_skel = bpf_ctx!(open.load(), "load tc_nat4_v4 skeleton")?;\n'
+        '    crate::nat_options::bind_cfg_map(tc_skel.maps.land_nat_dyn.as_fd().as_raw_fd());\n',
+    )
+    patch(
+        nat_rs,
+        "    crate::bpf_ctx!(\n"
+        "        xdp_open.maps.napt_ct.reuse_fd(tc_skel.maps.napt_ct.as_fd()),\n"
+        "        \"xdp_nat4_v4 reuse napt_ct\"\n"
+        "    )?;\n",
+        "    crate::bpf_ctx!(\n"
+        "        xdp_open.maps.napt_ct.reuse_fd(tc_skel.maps.napt_ct.as_fd()),\n"
+        "        \"xdp_nat4_v4 reuse napt_ct\"\n"
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        xdp_open.maps.land_nat_dyn.reuse_fd(tc_skel.maps.land_nat_dyn.as_fd()),\n"
+        "        \"xdp_nat4_v4 reuse land_nat_dyn\"\n"
+        "    )?;\n",
+    )
+    #    6f) metric mode drives the timer model: when the mode changes, re-read
+    #        the NAT options and push them into the live programs.
+    patch(
+        "landscape/src/metric/mod.rs",
+        "        if !matches!(self.current_mode(), MetricMode::Off) {\n"
+        "            self.start_service_locked().await?;\n"
+        "        }\n"
+        "        Ok(())\n"
+        "    }\n",
+        "        if !matches!(self.current_mode(), MetricMode::Off) {\n"
+        "            self.start_service_locked().await?;\n"
+        "        }\n"
+        "        // The metric mode gates the NAT timer model (event-driven timers vs\n"
+        "        // periodic reporting). Re-read the NAT options and push them into the\n"
+        "        // attached programs so the switch needs no NAT re-attach.\n"
+        "        landscape_ebpf::nat_options::reload();\n"
+        "        Ok(())\n"
+        "    }\n",
     )
 
     # 7) NAT options plumbing (full cone switch in the NAT modal).

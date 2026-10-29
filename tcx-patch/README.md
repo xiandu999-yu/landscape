@@ -332,7 +332,14 @@ bpftool map dump name napt_stats
     `[metric] mode`。只要不是 `off`（含缺省 `persistent`），就自动
     `event_driven=false` + `report_interval=5s`，保证活跃连接页面指标正常；
     只有 `mode = "off"` 才保持事件驱动。
-  - **显式 env 优先**（2026-10-29 起）：手动设了 `LANDSCAPE_NAT_EVENT_DRIVEN=1/0` 时
+  - **运行时热切换**（2026-10-29 起）：`event_driven` / `report_interval` 不再只存在于
+    `.rodata`，而是同时写进可写的一维数组 `land_nat_dyn`（`struct land_nat_dyn_cfg`）。
+    WebUI 改 `[metric] mode` 时 `MetricService::apply_runtime_config` 会调用
+    `nat_options::reload()` 把新值推进去，**不需要重启 landscape、也不需要重挂 NAT 段**；
+    已存在的 CT 在下一次 tick 生效（周期模式最长 30s）。
+    - 切到事件驱动时，老 CT 的 `pad1=0` 表示“定时器是按 tick 武装的”，回调会先用该流的
+      空闲超时重挂一次再释放，避免切模式瞬间把活跃流拆掉。
+  - **显式 env 优先**：手动设了 `LANDSCAPE_NAT_EVENT_DRIVEN=1/0` 时
     不再被上面的指标联动覆盖，方便 init 脚本做 A/B。注意 event 模式不会周期性上报
     ACTIVE，NAT 会话页看不到活跃流（只有删除事件）。
   - 需要实时指标又想要事件驱动，属于矛盾需求；二选一。

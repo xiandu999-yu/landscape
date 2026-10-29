@@ -12,9 +12,86 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 const NS: u64 = 1_000_000_000;
+
+/// Dup'd fds of every attached `land_nat_dyn` map (one per WAN link: each link
+/// loads its own NAT skeleton). Held so `reload()` can push new values into the
+/// live programs; `stages::nat4` appends on every attach.
+static CFG_MAP_FDS: OnceLock<Mutex<Vec<i32>>> = OnceLock::new();
+
+/// Upper bound on remembered maps; stale entries only keep a tiny detached map
+/// alive, so a small cap is enough for any multi-WAN setup.
+const CFG_MAP_FD_MAX: usize = 16;
+
+fn cfg_fds() -> &'static Mutex<Vec<i32>> {
+    CFG_MAP_FDS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Mirror of `struct land_nat_dyn_cfg` in `nat_v4/tc_nat4_rodata.h`.
+#[repr(C)]
+struct NatDynCfg {
+    report_interval_ns: u64,
+    event_driven: u8,
+    pad: [u8; 7],
+}
+
+/// Bind the loaded `land_nat_dyn` map and push the current options into it.
+pub fn bind_cfg_map(fd: i32) {
+    if fd < 0 {
+        return;
+    }
+    let dup = unsafe { libc::dup(fd) };
+    if dup < 0 {
+        tracing::warn!("failed to dup land_nat_dyn map fd: {}", std::io::Error::last_os_error());
+        return;
+    }
+    {
+        let mut fds = match cfg_fds().lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if fds.len() >= CFG_MAP_FD_MAX {
+            let old = fds.remove(0);
+            unsafe { libc::close(old) };
+        }
+        fds.push(dup);
+    }
+    push_cfg();
+}
+
+/// Write the timer-model knobs into every attached NAT program (no-op before
+/// the first attach).
+fn push_cfg() {
+    let fds: Vec<i32> = match cfg_fds().lock() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    if fds.is_empty() {
+        return;
+    }
+    let opts = current();
+    let cfg = NatDynCfg {
+        report_interval_ns: opts.report_interval_ns,
+        event_driven: u8::from(opts.event_driven),
+        pad: [0; 7],
+    };
+    let key: u32 = 0;
+    for fd in fds {
+        let ret = unsafe {
+            libbpf_rs::libbpf_sys::bpf_map_update_elem(
+                fd,
+                (&key as *const u32).cast(),
+                (&cfg as *const NatDynCfg).cast(),
+                0,
+            )
+        };
+        if ret != 0 {
+            tracing::warn!(ret, fd, "failed to push nat runtime cfg into land_nat_dyn");
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct NatOptions {
@@ -205,9 +282,11 @@ pub fn current() -> NatOptions {
     slot().read().map(|g| g.clone()).unwrap_or_default()
 }
 
-/// Re-read disk/env after the WebUI writes `nat-options.json`.
+/// Re-read disk/env after the WebUI writes `nat-options.json`, or after the
+/// metric mode changes (it drives `event_driven` / `report_interval_ns`).
 pub fn reload() {
     if let Ok(mut guard) = slot().write() {
         *guard = NatOptions::load();
     }
+    push_cfg();
 }
