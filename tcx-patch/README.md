@@ -440,7 +440,8 @@ bpftool net show dev wan0
 类比 xt_FLOWOFFLOAD / SFE 的“首包建表、后续包直发”，但实现在 eBPF 里。
 
 - **记录**：`tc_v4_from_lan` 完成 NAT 改写后，把 `(内网 saddr/sport, 远端 daddr/dport, proto)`
-  → `(external_addr, external_port, deadline)` 写进 `fa4_fast`；
+  → `(external_addr, external_port, deadline)` 写进 `fa4_fast`；**只记录转发流量**
+  （`skb->ingress_ifindex != 0`），路由器自身的 DNS/NTP/WebUI 流不落表；
 - **命中**：`tc_wan_egress_route` 在 `tc_cb_forwarded` 分支里先查这张表，命中就直接
   `napt_modify()` 改写 + 返回 `TC_ACT_OK`，**整条 egress 链（mss/firewall/nat/exit）都不走**；
 - **5 秒硬过期（不刷新）**：每条流每 5 秒至少有一个包走慢路径，顺带 `napt_ct_advance()`
