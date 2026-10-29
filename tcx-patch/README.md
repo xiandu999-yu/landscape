@@ -453,14 +453,23 @@ root 1: htb default 30
 
 分类只用两条 `u32`（TCP 靠 HTB 的 default 兜底），每个包多花约 0.5~1µs。
 
-配置（默认关闭）：
+配置（默认关闭，只认环境变量）：
 
-```json
-// $HOME/.landscape-router/qos-pipes.json
-{ "enable": true, "rate": "900mbit" }
+```sh
+LANDSCAPE_QOS_PIPES=1
+LANDSCAPE_QOS_RATE=900mbit      # 填线路速率的约 90%
 ```
 
-或环境变量 `LANDSCAPE_QOS_PIPES=1`、`LANDSCAPE_QOS_RATE=900mbit`（优先于文件）。
+两个变量在 WAN 链路起来时读取，**改完要重启 landscape 进程**（只重启 WAN 链路不行，
+进程环境不会变）。OpenWrt 的 procd 初始化脚本里这样加：
+
+```sh
+# /etc/init.d/landscape 的 start() 里，procd_open_instance 之前：
+export LANDSCAPE_QOS_PIPES=1
+export LANDSCAPE_QOS_RATE=900mbit
+# 或者：
+# procd_set_param env LANDSCAPE_QOS_PIPES=1 LANDSCAPE_QOS_RATE=900mbit
+```
 
 - `rate` 填线路速率的约 90%，给 AQM 留余量；
 - 开启后会**接管 WAN 口的 root qdisc**，和 SQM/cake 等其它整形互斥（同一时间只能有一套）；

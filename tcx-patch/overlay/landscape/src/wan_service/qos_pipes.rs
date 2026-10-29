@@ -20,21 +20,20 @@
 //!        `- 1:30  other prio 2  + fq_codel   (TCP by default)
 //! ```
 //!
-//! Opt-in through `$HOME/.landscape-router/qos-pipes.json`:
+//! Opt-in through the environment only:
 //!
-//! ```json
-//! { "enable": true, "rate": "900mbit" }
+//! ```sh
+//! LANDSCAPE_QOS_PIPES=1
+//! LANDSCAPE_QOS_RATE=900mbit      # ~90% of the real line rate
 //! ```
 //!
-//! or the environment (`LANDSCAPE_QOS_PIPES=1`, `LANDSCAPE_QOS_RATE=900mbit`),
-//! which wins over the file. `rate` should be ~90% of the real line rate so the
-//! AQM keeps a small standing queue.
+//! Both are read by the WAN route service when the link comes up, so a change
+//! takes effect after the landscape process (not just the link) is restarted.
 //!
 //! Requires the `tc` binary at runtime (OpenWrt: `iproute2-tc`). When it is
 //! missing or a command fails, the pipes are not installed and the WAN link
 //! keeps working as before.
 
-use std::path::PathBuf;
 use std::process::Command;
 
 /// UDP / ICMP / default class ids and their HTB priorities.
@@ -54,37 +53,8 @@ impl Default for QosPipesConfig {
     }
 }
 
-fn config_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("LANDSCAPE_QOS_PIPES_FILE") {
-        if !p.trim().is_empty() {
-            return Some(PathBuf::from(p));
-        }
-    }
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::Path::new(&h).join(".landscape-router").join("qos-pipes.json"))
-}
-
 fn load_config() -> QosPipesConfig {
     let mut cfg = QosPipesConfig::default();
-
-    if let Some(path) = config_path() {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
-            match serde_json::from_str::<serde_json::Value>(&raw) {
-                Ok(doc) => {
-                    if let Some(v) = doc.get("enable").and_then(|v| v.as_bool()) {
-                        cfg.enable = v;
-                    }
-                    if let Some(v) = doc.get("rate").and_then(|v| v.as_str()) {
-                        cfg.rate = v.trim().to_string();
-                    }
-                }
-                Err(err) => {
-                    tracing::warn!(path = %path.display(), %err, "invalid qos-pipes.json");
-                }
-            }
-        }
-    }
 
     if let Ok(v) = std::env::var("LANDSCAPE_QOS_PIPES") {
         cfg.enable =
@@ -139,8 +109,7 @@ pub fn apply(iface: &str) -> QosPipesGuard {
     if cfg.rate.is_empty() {
         tracing::warn!(
             dev = %iface,
-            "qos-pipes: enabled but no rate configured; set qos-pipes.json rate or \
-             LANDSCAPE_QOS_RATE (e.g. 900mbit)"
+            "qos-pipes: enabled but LANDSCAPE_QOS_RATE is empty (e.g. 900mbit)"
         );
         return inactive;
     }
