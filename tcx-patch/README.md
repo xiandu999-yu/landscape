@@ -435,6 +435,49 @@ bpftool net show dev wan0
 # egress : land_wan_egress_route → egress_snat
 ```
 
+## 按协议分类的 egress 管道（UDP / ICMP / TCP）
+
+Landscape 的转发不进 netfilter，TC BPF 又不能写 `skb->priority`（verifier 会拒），
+所以按协议的优先级只能放在 **WAN 口的 root qdisc**：`bpf_redirect` 最终仍走
+`dev_queue_xmit()`，qdisc 能看到每一个转发包。
+
+WAN 链路服务启动时安装、停止（或重连）时自动删除：
+
+```
+root 1: htb default 30
+  └─ 1:1  rate=<线路速率>
+       ├─ 1:10  UDP   prio 0  + fq_codel
+       ├─ 1:20  ICMP  prio 1  + fq_codel
+       └─ 1:30  其它  prio 2  + fq_codel   （TCP 默认落这里）
+```
+
+分类只用两条 `u32`（TCP 靠 HTB 的 default 兜底），每个包多花约 0.5~1µs。
+
+配置（默认关闭）：
+
+```json
+// $HOME/.landscape-router/qos-pipes.json
+{ "enable": true, "rate": "900mbit" }
+```
+
+或环境变量 `LANDSCAPE_QOS_PIPES=1`、`LANDSCAPE_QOS_RATE=900mbit`（优先于文件）。
+
+- `rate` 填线路速率的约 90%，给 AQM 留余量；
+- 开启后会**接管 WAN 口的 root qdisc**，和 SQM/cake 等其它整形互斥（同一时间只能有一套）；
+- 子类是 `rate 1mbit / ceil 线路速率` 的借用模型，UDP 先走但不会把 TCP 完全饿死；
+- 依赖运行时的 `tc`（OpenWrt 装 `iproute2-tc`）；缺失或命令失败只打 WARN，不影响转发；
+- 只作用于**出向**；下行要在 LAN 口 egress 做（WAN ingress 的包已经被 redirect 走了，ifb 接不到）；
+- IPv6 暂不分类（落默认类）；
+- 如果 WAN 是 landscape 自己 eBPF 封装的 PPPoE，qdisc 看到的是 PPPoE 帧，
+  `u32 match ip protocol` 可能匹配不到，需要改成按 PPPoE 协议字段匹配。
+
+验证：
+
+```sh
+tc -s class show dev eth0    # 1:10 (UDP) 的 packets 在涨 = 命中
+tc -s qdisc show dev eth0
+```
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。

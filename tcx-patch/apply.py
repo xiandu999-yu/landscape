@@ -903,6 +903,37 @@ def main() -> None:
         "            self.backbone.trie().del_ifindex(ifindex);\n"
         "        }\n",
     )
+
+    # 10) Per-protocol egress pipes (UDP / ICMP / TCP).
+    #     Forwarded traffic bypasses netfilter and TC BPF cannot write
+    #     skb->priority, so the only place that can classify it is the WAN root
+    #     qdisc. `qos_pipes.rs` (overlay) installs HTB + two u32 classifiers when
+    #     the WAN route service starts and removes them when it stops.
+    patch(
+        "landscape/src/wan_service/mod.rs",
+        "pub mod pppoe_client;\npub mod wan_route_service;\n",
+        "pub mod pppoe_client;\npub mod qos_pipes;\npub mod wan_route_service;\n",
+    )
+    patch(
+        "landscape/src/wan_service/wan_route_service.rs",
+        "    service_status.just_change_status(ServiceStatus::Running);\n"
+        "    tracing::info!(\"Waiting for external stop signal\");\n",
+        "    service_status.just_change_status(ServiceStatus::Running);\n"
+        "    // Per-protocol egress pipes (UDP / ICMP / TCP); opt-in, and the guard\n"
+        "    // removes the qdisc when this link stops.\n"
+        "    let qos_pipes_guard = crate::wan_service::qos_pipes::apply(&iface_name);\n"
+        "    tracing::info!(\"Waiting for external stop signal\");\n",
+    )
+    patch(
+        "landscape/src/wan_service/wan_route_service.rs",
+        "    drop(xdp_handle);\n"
+        "    drop(tc_handle);\n"
+        "    dataplane.del_redirect_able(ifindex);\n",
+        "    drop(qos_pipes_guard);\n"
+        "    drop(xdp_handle);\n"
+        "    drop(tc_handle);\n"
+        "    dataplane.del_redirect_able(ifindex);\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
