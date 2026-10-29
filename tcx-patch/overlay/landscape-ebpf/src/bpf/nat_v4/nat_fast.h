@@ -31,7 +31,7 @@
  * fast path deliberately skips.
  */
 
-#define NAT_FAST_TTL_NS (5ULL * 1000000000ULL)
+#define NAT_FAST_TTL_NS (30ULL * 1000000000ULL)
 
 struct nat_fast_key {
     __be32 saddr;
