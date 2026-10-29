@@ -399,6 +399,13 @@ LANDSCAPE_WAN_INGRESS_IFX_FALLBACK=1        # 入向兜底，见下
 打开后会用 `(0x02 | ingress_ifindex)` 兜底再查一次，命中该接口的链路链，后面 route
 看到 dst 是 LAN 就 `bpf_redirect` 过去。
 
+> **实现注意（2026-10-29 修复）**：兜底里只能读 `skb->ingress_ifindex` 一个字段。
+> 早期写成 `skb->ingress_ifindex ? skb->ingress_ifindex : skb->ifindex`，clang 会把两次
+> ctx 读合并成 `ctx + (cond ? 36 : 40)` 的变址访问，verifier 直接拒绝：
+> `dereference of modified ctx ptr R3 off=40 disallowed`，表现为
+> `prog 'land_wan_ingress_intro': BPF program load failed: -EACCES`、
+> `failed to start tc wan route`，WAN 入向整条链都挂不上。
+
 代价：这条兜底路径是 `bpf_redirect` 到 LAN，**不经过内核 forward 链（netfilter）**，
 未 NAT 的 WAN→LAN 包也会被转过去。所以默认关闭，只在“einat 是唯一 NAT 所有者”的
 机器上开，并配合 LAN 网段/主机防火墙。
