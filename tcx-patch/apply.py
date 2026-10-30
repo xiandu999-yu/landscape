@@ -1231,6 +1231,11 @@ def main() -> None:
         "        crate::stages::mss::init_mss(self, ifindex, mtu, has_eth_header)\n",
     )
     patch(
+        "landscape-ebpf/src/bin/mss_clamp.rs",
+        "    let mss_clamp = landscape_ebpf::stages::mss::init_mss(&dp, 1492, true).unwrap();\n",
+        "    let mss_clamp = landscape_ebpf::stages::mss::init_mss(&dp, ifindex, 1492, true).unwrap();\n",
+    )
+    patch(
         "landscape-ebpf/src/chain/xdp_wan_route.rs",
         "    crate::bpf_ctx!(\n"
         "        pin_and_reuse_map(&mut egress_route_open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
