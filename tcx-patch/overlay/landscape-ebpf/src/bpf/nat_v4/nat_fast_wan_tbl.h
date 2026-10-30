@@ -69,6 +69,7 @@ static __always_inline void nat_fast_wan_record(__be32 remote_addr, __be16 remot
 
 /* Returns TC_ACT_REDIRECT when served from the table, TC_ACT_OK otherwise. */
 static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off) {
+    nat_wan_ctl_add(4);
     char *data = (char *)(long)skb->data;
     char *data_end = (char *)(long)skb->data_end;
     struct iphdr *iph = (void *)(data + l3_off);
@@ -97,6 +98,7 @@ static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off)
         dport = uh->dest;
     }
 
+    nat_wan_ctl_add(5);
     struct nat_fast_wan_key key = {};
     key.remote_addr = iph->saddr;
     key.wan_addr = iph->daddr;
@@ -105,7 +107,10 @@ static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off)
     key.proto = proto;
 
     struct nat_fast_wan_value *value = bpf_map_lookup_elem(&fa4_fast_wan, &key);
-    if (!value) return TC_ACT_OK;
+    if (!value) {
+        nat_wan_ctl_add(6);
+        return TC_ACT_OK;
+    }
     if (value->gen != (__u32)nat_wan_gen()) {
         bpf_map_delete_elem(&fa4_fast_wan, &key);
         return TC_ACT_OK;
