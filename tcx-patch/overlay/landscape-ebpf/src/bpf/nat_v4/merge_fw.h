@@ -38,7 +38,7 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } firewall_block_ip4_map SEC(".maps");
 
-static __always_inline int nat_merge_fw4(__sk_buff *skb, __be32 addr) {
+static __always_inline int nat_merge_fw4(struct __sk_buff *skb, __be32 addr) {
     struct ipv4_lpm_key key = {
         .prefixlen = 32,
         .addr = addr,
