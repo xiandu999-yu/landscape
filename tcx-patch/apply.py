@@ -957,7 +957,7 @@ def main() -> None:
         "        view.l4_protocol != IPV4_PROTO_ICMP && !napt_is_icmp_error(&view) &&\n"
         "        !napt_is_non_initial(&view)) {\n"
         "        nat_fast_record(src_addr, view.sport, dst_addr, view.dport, view.l4_protocol,\n"
-        "                        new_addr, new_port);\n"
+        "                        new_addr, new_port, ct_timeout);\n"
         "    }\n"
         "\n"
         "chain:\n",
@@ -1426,6 +1426,65 @@ def main() -> None:
         "        pin_and_reuse_map(&mut open_skel.maps.fa4_stats, &paths.fa4_stats),\n"
         '        "tc_wan_egress pin fa4_stats"\n'
         "    )?;\n",
+    )
+    # 14) CT-derived fast-path lifetime: the NAT stage hands the timeout it just
+    #     armed to nat_fast_record(), so long-lived UDP flows keep their entry
+    #     for minutes (cap 300s) instead of the old fixed 30s.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h",
+        "static __always_inline int napt_lan_state(struct __sk_buff *skb, const struct tc_nat_view *view,\n"
+        "                                          __be32 src_addr, __be32 dst_addr, __be32 *new_addr,\n"
+        "                                          __be16 *new_port) {\n",
+        "static __always_inline int napt_lan_state(struct __sk_buff *skb, const struct tc_nat_view *view,\n"
+        "                                          __be32 src_addr, __be32 dst_addr, __be32 *new_addr,\n"
+        "                                          __be16 *new_port, __u64 *ct_timeout) {\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h",
+        "    *new_addr = land_nat_external_addr;\n"
+        "    *new_port = external_port;\n"
+        "    return TC_ACT_OK;\n"
+        "}\n",
+        "    *new_addr = land_nat_external_addr;\n"
+        "    *new_port = external_port;\n"
+        "    if (ct_timeout) *ct_timeout = napt_ct_wait_ns(&key, ct);\n"
+        "    return TC_ACT_OK;\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    __be16 new_port = 0;\n"
+        "    int rc = TC_ACT_OK;\n"
+        "\n"
+        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
+        "\n"
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
+        "    __be16 new_port = 0;\n"
+        "    __u64 ct_timeout = 0;\n"
+        "    int rc = TC_ACT_OK;\n"
+        "\n"
+        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
+        "\n"
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port);\n",
+        "    rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port, &ct_timeout);\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/bench/bench_nat4_v4.bpf.c",
+        "    int rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port);\n"
+        "    bench_sink_add(rc == TC_ACT_OK && new_port == bpf_htons(40000) ? 1 : BENCH_FAIL);\n",
+        "    int rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port, 0);\n"
+        "    bench_sink_add(rc == TC_ACT_OK && new_port == bpf_htons(40000) ? 1 : BENCH_FAIL);\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/bench/bench_nat4_v4.bpf.c",
+        "    int rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port);\n"
+        "    bench_sink_add(rc == TC_ACT_SHOT ? 1 : BENCH_FAIL);\n",
+        "    int rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port, 0);\n"
+        "    bench_sink_add(rc == TC_ACT_SHOT ? 1 : BENCH_FAIL);\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 

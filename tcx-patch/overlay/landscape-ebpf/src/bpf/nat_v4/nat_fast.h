@@ -17,9 +17,11 @@
  * chain tail call and skip the chain entirely.
  *
  * Deadlines, not timers:
- *   - an entry lives for NAT_FAST_TTL_NS (5s) from the moment it was recorded
+ *   - an entry lives for min(NAT_FAST_TTL_CAP_NS, ct_timeout - MARGIN) from the
+ *     moment it was recorded; the CT timeout is what the NAT stage just armed,
+ *     so a long-lived UDP flow can keep its entry for minutes instead of 30s
  *     and the deadline is NOT refreshed on hits;
- *   - so at least one packet per flow per 5s takes the slow path, which runs
+ *   - so at least one packet per flow per 30s takes the slow path, which runs
  *     napt_ct_advance() and re-arms the conntrack timer, and re-records the
  *     entry;
  *   - that is what keeps the CT (and therefore the port mapping) alive without
@@ -31,7 +33,9 @@
  * fast path deliberately skips.
  */
 
-#define NAT_FAST_TTL_NS (5ULL * 1000000000ULL)
+#define NAT_FAST_TTL_CAP_NS (300ULL * 1000000000ULL)
+#define NAT_FAST_TTL_MARGIN_NS (30ULL * 1000000000ULL)
+#define NAT_FAST_TTL_MIN_NS (2ULL * 1000000000ULL)
 
 struct nat_fast_key {
     __be32 saddr;
@@ -83,7 +87,7 @@ struct {
 
 static __always_inline void nat_fast_record(__be32 saddr, __be16 sport, __be32 daddr,
                                             __be16 dport, __u8 proto, __be32 external_addr,
-                                            __be16 external_port) {
+                                            __be16 external_port, __u64 ct_timeout) {
     struct nat_fast_key key = {};
     key.saddr = saddr;
     key.daddr = daddr;
@@ -94,7 +98,14 @@ static __always_inline void nat_fast_record(__be32 saddr, __be16 sport, __be32 d
     struct nat_fast_value value = {};
     value.external_addr = external_addr;
     value.external_port = external_port;
-    value.deadline_ns = bpf_ktime_get_ns() + NAT_FAST_TTL_NS;
+    __u64 ttl = NAT_FAST_TTL_CAP_NS;
+    if (ct_timeout > NAT_FAST_TTL_MARGIN_NS) {
+        __u64 derived = ct_timeout - NAT_FAST_TTL_MARGIN_NS;
+        if (derived < ttl) ttl = derived;
+    } else {
+        ttl = NAT_FAST_TTL_MIN_NS;
+    }
+    value.deadline_ns = bpf_ktime_get_ns() + ttl;
 
     bpf_map_update_elem(&fa4_fast, &key, &value, BPF_ANY);
     fa4_stat_inc(FA4_STAT_EGRESS_RECORD);

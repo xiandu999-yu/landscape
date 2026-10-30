@@ -444,8 +444,10 @@ bpftool net show dev wan0
   （`skb->ingress_ifindex != 0`），路由器自身的 DNS/NTP/WebUI 流不落表；
 - **命中**：`tc_wan_egress_route` 在 `tc_cb_forwarded` 分支里先查这张表，命中就直接
   `napt_modify()` 改写 + 返回 `TC_ACT_OK`，**整条 egress 链（mss/firewall/nat/exit）都不走**；
-- **5 秒硬过期（不刷新）**：每条流每 5 秒至少有一个包走慢路径，顺带 `napt_ct_advance()`
-  续命 CT 并重新落表。这样 fast path 不需要碰 `napt_ct`，也不会让 CT 被提前释放；
+- **按 CT 推导的硬过期（不刷新）**：`ttl = min(300s, ct_timeout - 30s)`，`ct_timeout` 来自
+  `napt_ct_wait_ns()`（NAT 阶段刚给 CT 上的那个值）。UDP 默认 120s → 条目 90s；
+  UDP 已见回包 600s → 条目 300s（上限）。条目到期那个包走慢路径，顺带 `napt_ct_advance()`
+  续命并重新落表，所以 fast path 不需要碰 `napt_ct`；
 - **只在事件驱动模式记录**（`land_nat_event_driven_get()`）：周期模式下 CT 状态机需要逐包推进，
   跳过会导致流被拆；
 - 表是 pinned map，`maps::nat::init_fa4_fast` 在任何程序加载前创建，NAT 与 egress route
@@ -459,7 +461,7 @@ bpftool net show dev wan0
 - **不做网卡防火墙/黑名单检查**：命中 fast path 的包跳过 firewall stage；
 - CT 被删除（空闲超时、flush）时，同 key 的 fast 条目在 `napt_ct_delete()` 里一起删掉
   （`#ifdef LAND_NAT_FAST`，只在 TC 对象里生效）；理论上仍然残留的只有 XDP NAT 创建的 CT
-  （本机没开 XDP，不受影响），以及 5 秒内还没被任何包命中的条目；
+  （本机没开 XDP，不受影响），以及寿命内还没被任何包命中的条目；
 - 不走 landscape 自己 eBPF 封装的 PPPoE 链路（eth 头/出口封装由 exit stage 完成，跳过会发错帧）。
 
 计数（分方向，入向槽位先占住）：
