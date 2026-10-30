@@ -81,6 +81,8 @@ static __always_inline void nat_fast_wan_record(__be32 remote_addr, __be16 remot
 #define NAT_WAN_EXIT_FRAG 4
 #define NAT_WAN_EXIT_PROTO 5
 #define NAT_WAN_EXIT_L4 6
+#define NAT_WAN_EXIT_PULL 7
+#define NAT_WAN_EXIT_MAC 8
 
 static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off) {
     nat_wan_ctl_add(4);
@@ -131,11 +133,18 @@ static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off)
         return TC_ACT_OK;
     }
 
+    /* napt_modify() rewrites the header through direct packet access, which
+     * needs the bytes in the linear area (a non-linear skb makes it return
+     * non-OK and the hit was silently dropped). */
+    __u32 need = l3_off + ihl + 20;
+    if (bpf_skb_pull_data(skb, need)) return nat_wan_ctl_set(7, NAT_WAN_EXIT_PULL);
     if (napt_modify(skb, value->internal_addr, value->internal_port, LAND_FRAG_FROM_WAN, l3_off) !=
         TC_ACT_OK)
-        return TC_ACT_OK;
-    if (bpf_skb_store_bytes(skb, 0, value->dst_mac, 6, 0)) return TC_ACT_OK;
-    if (bpf_skb_store_bytes(skb, 6, value->src_mac, 6, 0)) return TC_ACT_OK;
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_PULL);
+    if (bpf_skb_store_bytes(skb, 0, value->dst_mac, 6, 0))
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_MAC);
+    if (bpf_skb_store_bytes(skb, 6, value->src_mac, 6, 0))
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_MAC);
 
     nat_wan_ctl_add(2);
     int ret = bpf_redirect(value->out_ifindex, 0);
