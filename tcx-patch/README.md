@@ -462,6 +462,19 @@ bpftool net show dev wan0
   （本机没开 XDP，不受影响），以及 5 秒内还没被任何包命中的条目；
 - 不走 landscape 自己 eBPF 封装的 PPPoE 链路（eth 头/出口封装由 exit stage 完成，跳过会发错帧）。
 
+计数（分方向，入向槽位先占住）：
+
+| 下标 | 含义 |
+|---|---|
+| 0 | egress 落表次数 |
+| 1 | egress 命中次数 |
+| 2 | egress 到期被清次数 |
+| 3~5 | 入向预留（record / hit / expired） |
+
+```sh
+bpftool map dump name fa4_stats
+```
+
 验证：
 
 ```sh
@@ -519,12 +532,15 @@ bpftool prog show | grep tc_wan_egress_route  # run_time 应下降
 ### 验证
 
 ```sh
-# 只剩 v6 防火墙程序，v4 的应该没了
-bpftool prog show | grep tc_firewall
+# `bpftool prog show` 列的是“已加载”，v4 程序仍会被加载（v6 还要用这个对象），
+# 判断是否进链要看计数器。
 
-# 加一条黑名单，确认立即生效
-# WebUI 加一个 IP 后，在 LAN 侧 curl 它应超时；删掉后恢复
+# 合并路径的丢包计数：napt_stats 第 8 项（下标 7）
+bpftool map dump name napt_stats
+# 加黑名单后从 LAN 访问该 IP，下标 7 的计数应 +1；删规则后不再增长
 ```
+
+功能验证：WebUI 加一个 IP 后，LAN 侧 `curl -m 3` 访问应超时；删掉规则后恢复。
 
 ## 已知限制 / 下一步
 

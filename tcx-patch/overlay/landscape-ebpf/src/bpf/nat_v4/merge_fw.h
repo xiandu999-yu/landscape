@@ -39,11 +39,16 @@ struct {
 } firewall_block_ip4_map SEC(".maps");
 
 static __always_inline int nat_merge_fw4(struct __sk_buff *skb, __be32 addr) {
+    (void)skb;
     struct ipv4_lpm_key key = {
         .prefixlen = 32,
         .addr = addr,
     };
-    return bpf_map_lookup_elem(&firewall_block_ip4_map, &key) ? TC_ACT_SHOT : TC_ACT_OK;
+    if (bpf_map_lookup_elem(&firewall_block_ip4_map, &key)) {
+        napt_stat_inc(NAPT_STAT_FW_DROP);
+        return TC_ACT_SHOT;
+    }
+    return TC_ACT_OK;
 }
 
 #endif /* LAND_NAT_MERGE_FW_H */

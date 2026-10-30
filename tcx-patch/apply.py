@@ -225,6 +225,7 @@ def main() -> None:
         '    NAPT_STAT_REMOTE_DENIED = 4,\n'
         '    NAPT_STAT_CT_FULL = 5,\n'
         '    NAPT_STAT_CT_BUSY = 6,\n'
+        '    NAPT_STAT_FW_DROP = 7,\n'
         '};\n\n'
         'struct {\n'
         '    __uint(type, BPF_MAP_TYPE_ARRAY);\n'
@@ -1069,7 +1070,12 @@ def main() -> None:
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
         "#define LAND_NAT_FAST 1\n",
         "#define LAND_NAT_FAST 1\n"
-        '#include "nat_v4/merge_mss.h"\n'
+        '#include "nat_v4/merge_mss.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        '#include "nat_v4/tc_nat4_packet.h"\n',
+        '#include "nat_v4/tc_nat4_packet.h"\n'
         '#include "nat_v4/merge_fw.h"\n',
     )
     patch(
@@ -1330,6 +1336,96 @@ def main() -> None:
         "            continue;\n"
         "        }\n"
         "        dp.tc().inject_from_lan(",
+    )
+    # 13) fast-path per-direction counters (egress now, ingress reserved).
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub land_mss_cfg: PathBuf,\n",
+        "    pub land_mss_cfg: PathBuf,\n"
+        "    pub fa4_stats: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            land_mss_cfg: root.join(nat::LAND_MSS_CFG_PIN),\n",
+        "            land_mss_cfg: root.join(nat::LAND_MSS_CFG_PIN),\n"
+        "            fa4_stats: root.join(nat::FA4_STATS_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const LAND_MSS_CFG_PIN: &str = "land_mss_cfg";\n',
+        'pub(crate) const LAND_MSS_CFG_PIN: &str = "land_mss_cfg";\n'
+        'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `land_mss_cfg` hash at `path`.\n"
+        "pub fn init_land_mss_cfg(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&LAND_MSS_CFG_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `land_mss_cfg` hash at `path`.\n"
+        "pub fn init_land_mss_cfg(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&LAND_MSS_CFG_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `fa4_stats`: per-direction fast-path counters (8 slots).\n"
+        "pub(crate) const FA4_STATS_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: FA4_STATS_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 8,\n"
+        "    max_entries: 8,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `fa4_stats` array at `path`.\n"
+        "pub fn init_fa4_stats(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("init land_mss_cfg failed");\n',
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("init land_mss_cfg failed");\n'
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("test init land_mss_cfg");\n',
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("test init land_mss_cfg");\n'
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n',
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.land_mss_cfg, &paths.land_mss_cfg)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.land_mss_cfg, &paths.land_mss_cfg)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.fa4_stats, &paths.fa4_stats)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/xdp_wan_route.rs",
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        '        "tc_wan_egress_route pin fa4_fast"\n'
+        "    )?;\n",
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        '        "tc_wan_egress_route pin fa4_fast"\n'
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.fa4_stats, &paths.fa4_stats),\n"
+        '        "tc_wan_egress_route pin fa4_stats"\n'
+        "    )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/tc_wan_route.rs",
+        "        pin_and_reuse_map(&mut open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        '        "tc_wan_egress pin fa4_fast"\n'
+        "    )?;\n",
+        "        pin_and_reuse_map(&mut open_skel.maps.fa4_fast, &paths.fa4_fast),\n"
+        '        "tc_wan_egress pin fa4_fast"\n'
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.fa4_stats, &paths.fa4_stats),\n"
+        '        "tc_wan_egress pin fa4_stats"\n'
+        "    )?;\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 

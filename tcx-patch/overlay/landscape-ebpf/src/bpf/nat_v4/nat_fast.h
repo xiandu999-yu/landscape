@@ -51,6 +51,29 @@ struct nat_fast_value {
 
 _Static_assert(sizeof(struct nat_fast_key) == 16, "nat_fast_key must be 16 bytes");
 
+/*
+ * Per-direction counters. Slots 3..5 are reserved for the ingress fast path so
+ * egress and ingress can be observed (and later enabled) independently.
+ */
+#define FA4_STAT_EGRESS_RECORD 0
+#define FA4_STAT_EGRESS_HIT 1
+#define FA4_STAT_EGRESS_EXPIRED 2
+#define FA4_STAT_INGRESS_RECORD 3
+#define FA4_STAT_INGRESS_HIT 4
+#define FA4_STAT_INGRESS_EXPIRED 5
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 8);
+    __type(key, __u32);
+    __type(value, __u64);
+} fa4_stats SEC(".maps");
+
+static __always_inline void fa4_stat_inc(__u32 idx) {
+    __u64 *slot = bpf_map_lookup_elem(&fa4_stats, &idx);
+    if (slot) __sync_fetch_and_add(slot, 1);
+}
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 32768);
@@ -74,6 +97,7 @@ static __always_inline void nat_fast_record(__be32 saddr, __be16 sport, __be32 d
     value.deadline_ns = bpf_ktime_get_ns() + NAT_FAST_TTL_NS;
 
     bpf_map_update_elem(&fa4_fast, &key, &value, BPF_ANY);
+    fa4_stat_inc(FA4_STAT_EGRESS_RECORD);
 }
 
 /*
@@ -124,6 +148,7 @@ static __always_inline int nat_fast_try(struct __sk_buff *skb, __u32 l3_off) {
     if (!value) return 0;
     if (bpf_ktime_get_ns() > value->deadline_ns) {
         bpf_map_delete_elem(&fa4_fast, &key);
+        fa4_stat_inc(FA4_STAT_EGRESS_EXPIRED);
         return 0;
     }
 
@@ -131,6 +156,7 @@ static __always_inline int nat_fast_try(struct __sk_buff *skb, __u32 l3_off) {
     __be16 new_port = value->external_port;
 
     if (napt_modify(skb, new_addr, new_port, LAND_FRAG_FROM_LAN, l3_off) != TC_ACT_OK) return 0;
+    fa4_stat_inc(FA4_STAT_EGRESS_HIT);
     return 1;
 }
 
