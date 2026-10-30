@@ -1584,6 +1584,115 @@ def main() -> None:
         "        }\n"
         "        if ((u64)current_l3_offset + sizeof(struct iphdr) > MAX_OFFSET) return TC_ACT_OK;\n",
     )
+    # 16) Ingress fast path plumbing: shared pinned fa4_fast_wan + env gate.
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub fa4_stats: PathBuf,\n",
+        "    pub fa4_stats: PathBuf,\n"
+        "    pub fa4_fast_wan: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            fa4_stats: root.join(nat::FA4_STATS_PIN),\n",
+        "            fa4_stats: root.join(nat::FA4_STATS_PIN),\n"
+        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n',
+        'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n'
+        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `fa4_stats` array at `path`.\n"
+        "pub fn init_fa4_stats(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `fa4_stats` array at `path`.\n"
+        "pub fn init_fa4_stats(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `fa4_fast_wan`: ingress fast-path table (key 16, value 40).\n"
+        "pub(crate) const FA4_FAST_WAN_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Hash,\n"
+        "    name: FA4_FAST_WAN_PIN,\n"
+        "    key_size: 16,\n"
+        "    value_size: 40,\n"
+        "    max_entries: 32768,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
+        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n',
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n'
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n',
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n'
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/mod.rs",
+        "/// Publish the link MTU so the NAT programs can clamp MSS.\n",
+        "/// Ingress fast path switch (`LANDSCAPE_NAT_FASTPATH_INGRESS=1`).\n"
+        "pub(crate) fn fast_ingress_enabled() -> bool {\n"
+        "    std::env::var(\"LANDSCAPE_NAT_FASTPATH_INGRESS\")\n"
+        "        .map(|v| {\n"
+        "            matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "        })\n"
+        "        .unwrap_or(false)\n"
+        "}\n"
+        "\n"
+        "/// Publish the link MTU so the NAT programs can clamp MSS.\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "        rodata.land_nat_merge_fw = if merge_fw { 1 } else { 0 };\n",
+        "        rodata.land_nat_merge_fw = if merge_fw { 1 } else { 0 };\n"
+        "        rodata.land_nat_fast_ingress = if crate::maps::nat::fast_ingress_enabled() { 1 } else { 0 };\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/tc_wan_route.rs",
+        "    open_skel.maps.rodata_data.as_deref_mut().unwrap().xdp_handoff_enabled = xdp_handoff_enabled;\n",
+        "    open_skel.maps.rodata_data.as_deref_mut().unwrap().xdp_handoff_enabled = xdp_handoff_enabled;\n"
+        "    open_skel.maps.rodata_data.as_deref_mut().unwrap().land_nat_fast_ingress =\n"
+        "        if crate::maps::nat::fast_ingress_enabled() { 1 } else { 0 };\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.fa4_fast_wan, &paths.fa4_fast_wan),\n"
+        "        \"tc_wan_ingress_intro pin fa4_fast_wan\"\n"
+        "    )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/xdp_wan_route.rs",
+        "    intro_open_skel.maps.rodata_data.as_deref_mut().unwrap().xdp_handoff_enabled = true;\n",
+        "    intro_open_skel.maps.rodata_data.as_deref_mut().unwrap().xdp_handoff_enabled = true;\n"
+        "    intro_open_skel.maps.rodata_data.as_deref_mut().unwrap().land_nat_fast_ingress =\n"
+        "        if crate::maps::nat::fast_ingress_enabled() { 1 } else { 0 };\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut intro_open_skel.maps.fa4_fast_wan, &paths.fa4_fast_wan),\n"
+        "        \"tc_wan_ingress_intro pin fa4_fast_wan\"\n"
+        "    )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/route_backbone.rs",
+        '        let mut open_skel = bpf_ctx!(builder.open(obj), "open tc_wan_ingress_route skeleton")?;\n',
+        '        let mut open_skel = bpf_ctx!(builder.open(obj), "open tc_wan_ingress_route skeleton")?;\n'
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(&mut open_skel.maps.fa4_fast_wan, &paths.fa4_fast_wan),\n"
+        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        "        )?;\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 

@@ -39,16 +39,15 @@ struct nat_fast_wan_key {
 };
 
 struct nat_fast_wan_value {
-    __be32 internal_addr;
-    __be16 internal_port;
-    __u16 pad;
-    __u32 out_ifindex;
-    __u8 dst_mac[6];
-    __u8 src_mac[6];
-    __u16 pad2;
-    __u64 deadline_ns;
-    __u32 gen;
-    __u32 pad3;
+    __be32 internal_addr; /* 0 */
+    __u32 out_ifindex;    /* 4 */
+    __u64 deadline_ns;    /* 8 (keeps the u64 8-aligned) */
+    __u16 internal_port;  /* 16 */
+    __u16 pad;            /* 18 */
+    __u32 gen;            /* 20 */
+    __u8 dst_mac[6];      /* 24 */
+    __u8 src_mac[6];      /* 30 */
+    __u32 pad2;           /* 36 */
 };
 
 _Static_assert(sizeof(struct nat_fast_wan_key) == 16, "nat_fast_wan_key must be 16");

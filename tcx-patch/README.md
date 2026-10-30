@@ -557,7 +557,13 @@ WAN→LAN 方向，和出向对称：
 
 寿命：TCP 15s / QUIC(443) 10s / 其它 UDP 5s，**硬过期不刷新**——到期那个包回慢路径，顺带续 CT。
 
-状态：BPF 侧接线已完成，`land_nat_fast_ingress` 默认 0，**当前完全惰性**；Rust 侧（pin 共享 map、env 开关、指标切换清表）还没做，下一步补。
+状态：BPF + Rust 接线完成，`LANDSCAPE_NAT_FASTPATH_INGRESS=1` 后生效（默认关）。
+
+尚未实现（靠 TTL 兜底）：
+
+- `napt_ct_delete` 里不删入向条目——条目寿命 5/10/15 秒，CT 到期后最多残留这么久；
+- 指标模式切到非 off 时不清表——记录闸门会关，已存在的条目在寿命内自然过期；
+- generation（`nat_wan_ctl`）目前只在记录时取数、命中时比对，**还没有任何代码去 bump 它**，所以 MAC/网口变化只能靠 TTL（≤15 秒）兜底。
 
 ## 已知限制 / 下一步
 
