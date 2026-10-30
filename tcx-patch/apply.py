@@ -1575,14 +1575,18 @@ def main() -> None:
     )
     patch(
         "landscape-ebpf/src/bpf/tc_wan_ingress_intro.bpf.c",
-        "    if (is_ipv4) {\n"
-        "        if ((u64)current_l3_offset + sizeof(struct iphdr) > MAX_OFFSET) return TC_ACT_OK;\n",
-        "    if (is_ipv4) {\n"
-        "        if (land_nat_fast_ingress) {\n"
-        "            int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
-        "            if (fast == TC_ACT_REDIRECT) return fast;\n"
-        "        }\n"
-        "        if ((u64)current_l3_offset + sizeof(struct iphdr) > MAX_OFFSET) return TC_ACT_OK;\n",
+        "    int handoff_ret = xdp_handoff_check(skb, false);\n"
+        "    if (handoff_ret != TC_ACT_OK) return handoff_ret;\n",
+        "    int handoff_ret = xdp_handoff_check(skb, false);\n"
+        "    if (handoff_ret != TC_ACT_OK) return handoff_ret;\n"
+        "\n"
+        "    /* Must run before any packet pointer is captured: the helpers below\n"
+        "     * invalidate pkt pointers, so a later hook makes the verifier lose\n"
+        "     * the type of the already-loaded skb->data. */\n"
+        "    if (land_nat_fast_ingress) {\n"
+        "        int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
+        "        if (fast == TC_ACT_REDIRECT) return fast;\n"
+        "    }\n",
     )
     # 16) Ingress fast path plumbing: shared pinned fa4_fast_wan + env gate.
     patch(
