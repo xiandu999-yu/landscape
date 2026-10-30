@@ -1053,6 +1053,183 @@ def main() -> None:
         "    pin_and_reuse_map(&mut open.maps.nat_metric_events, &paths.nat_metric_events)?;\n"
         "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n",
     )
+
+    # 11) Merge the MSS stage into the NAT programs (LANDSCAPE_NAT_MERGE_MSS=1).
+    #     Saves one program + one tail call + one parse per direction; the MTU
+    #     travels through the pinned `land_mss_cfg` (ifindex -> mtu) because the
+    #     MSS stage is attached by the link service and NAT is attached later.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h",
+        "const volatile __u8 land_nat_fastpath = 0;\n",
+        "const volatile __u8 land_nat_fastpath = 0;\n"
+        "const volatile __u8 land_nat_merge_mss = 0;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "#define LAND_NAT_FAST 1\n",
+        "#define LAND_NAT_FAST 1\n"
+        '#include "nat_v4/merge_mss.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n"
+        "        goto chain;\n",
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n"
+        "        goto chain;\n"
+        "\n"
+        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_WAN))\n"
+        "        goto chain;\n",
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_WAN))\n"
+        "        goto chain;\n"
+        "\n"
+        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub fa4_fast: PathBuf,\n",
+        "    pub fa4_fast: PathBuf,\n"
+        "    pub land_mss_cfg: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            fa4_fast: root.join(nat::FA4_FAST_PIN),\n",
+        "            fa4_fast: root.join(nat::FA4_FAST_PIN),\n"
+        "            land_mss_cfg: root.join(nat::LAND_MSS_CFG_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FA4_FAST_PIN: &str = "fa4_fast";\n',
+        'pub(crate) const FA4_FAST_PIN: &str = "fa4_fast";\n'
+        'pub(crate) const LAND_MSS_CFG_PIN: &str = "land_mss_cfg";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `fa4_fast` hash at `path`.\n"
+        "pub fn init_fa4_fast(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `fa4_fast` hash at `path`.\n"
+        "pub fn init_fa4_fast(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `land_mss_cfg`: ifindex -> MTU for the merged MSS clamp.\n"
+        "pub(crate) const LAND_MSS_CFG_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Hash,\n"
+        "    name: LAND_MSS_CFG_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 2,\n"
+        "    max_entries: 256,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `land_mss_cfg` hash at `path`.\n"
+        "pub fn init_land_mss_cfg(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&LAND_MSS_CFG_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("init fa4_fast failed");\n',
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("init fa4_fast failed");\n'
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("init land_mss_cfg failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("test init fa4_fast");\n',
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("test init fa4_fast");\n'
+        '    nat::init_land_mss_cfg(&paths.land_mss_cfg).expect("test init land_mss_cfg");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/mod.rs",
+        "pub use init::*;\n",
+        "pub use init::*;\n"
+        "\n"
+        "/// Merged MSS mode: NAT clamps MSS itself and the standalone stage is not\n"
+        "/// attached (`LANDSCAPE_NAT_MERGE_MSS=1`).\n"
+        "pub(crate) fn merge_mss_enabled() -> bool {\n"
+        "    std::env::var(\"LANDSCAPE_NAT_MERGE_MSS\")\n"
+        "        .map(|v| {\n"
+        "            matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "        })\n"
+        "        .unwrap_or(false)\n"
+        "}\n"
+        "\n"
+        "/// Publish the link MTU so the NAT programs can clamp MSS.\n"
+        "pub(crate) fn publish_mss_cfg(path: &std::path::Path, ifindex: u32, mtu: u16) {\n"
+        "    let map = match libbpf_rs::MapHandle::from_pinned_path(path) {\n"
+        "        Ok(map) => map,\n"
+        "        Err(err) => {\n"
+        "            tracing::warn!(%err, path = %path.display(), \"land_mss_cfg open failed\");\n"
+        "            return;\n"
+        "        }\n"
+        "    };\n"
+        "    if let Err(err) = map.update(\n"
+        "        &ifindex.to_ne_bytes(),\n"
+        "        &mtu.to_ne_bytes(),\n"
+        "        libbpf_rs::MapFlags::ANY,\n"
+        "    ) {\n"
+        "        tracing::warn!(%err, ifindex, mtu, \"land_mss_cfg update failed\");\n"
+        "    }\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "        rodata.land_nat_fastpath = if fastpath { 1 } else { 0 };\n",
+        "        rodata.land_nat_fastpath = if fastpath { 1 } else { 0 };\n"
+        "        let merge_mss = std::env::var(\"LANDSCAPE_NAT_MERGE_MSS\")\n"
+        "            .map(|v| {\n"
+        "                matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "            })\n"
+        "            .unwrap_or(false);\n"
+        "        rodata.land_nat_merge_mss = if merge_mss { 1 } else { 0 };\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.land_mss_cfg, &paths.land_mss_cfg)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/mss.rs",
+        "pub fn init_mss(\n"
+        "    dp: &Arc<WanLinkDataplane>,\n"
+        "    mtu: u16,\n"
+        "    has_eth_header: bool,\n"
+        ") -> LdEbpfResult<MssHandle> {\n"
+        "    Ok(MssHandle {\n"
+        "        tc: Some(attach_tc_mss(dp, mtu, has_eth_header)?),\n"
+        "        xdp: Some(init_xdp_mss(dp, mtu, has_eth_header)?),\n"
+        "    })\n"
+        "}\n",
+        "pub fn init_mss(\n"
+        "    dp: &Arc<WanLinkDataplane>,\n"
+        "    ifindex: u32,\n"
+        "    mtu: u16,\n"
+        "    has_eth_header: bool,\n"
+        ") -> LdEbpfResult<MssHandle> {\n"
+        "    // Merged mode: the NAT stage clamps MSS itself, so publish the MTU\n"
+        "    // and skip both the TC and XDP MSS stages.\n"
+        "    if crate::maps::nat::merge_mss_enabled() {\n"
+        "        crate::maps::nat::publish_mss_cfg(&dp.backbone().paths().land_mss_cfg, ifindex, mtu);\n"
+        "        return Ok(MssHandle { tc: None, xdp: None });\n"
+        "    }\n"
+        "    Ok(MssHandle {\n"
+        "        tc: Some(attach_tc_mss(dp, mtu, has_eth_header)?),\n"
+        "        xdp: Some(init_xdp_mss(dp, mtu, has_eth_header)?),\n"
+        "    })\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/wan_link/mod.rs",
+        "        crate::stages::mss::init_mss(self, mtu, has_eth_header)\n",
+        "        crate::stages::mss::init_mss(self, ifindex, mtu, has_eth_header)\n",
+    )
     patch(
         "landscape-ebpf/src/chain/xdp_wan_route.rs",
         "    crate::bpf_ctx!(\n"

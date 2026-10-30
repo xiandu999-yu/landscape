@@ -470,6 +470,26 @@ tc -s class ...                               # 不适用；看 napt_ct 计数�
 bpftool prog show | grep tc_wan_egress_route  # run_time 应下降
 ```
 
+## 合并 MSS stage（`LANDSCAPE_NAT_MERGE_MSS=1`，实验）
+
+打开后：
+
+- `init_mss()` 不再挂 `tc_mss` 阶段（TC 和 XDP 都不挂），只把该链路的 MTU 写进
+  pinned map `land_mss_cfg`（ifindex → mtu）；
+- NAT 程序在 `tc_nat_read4` 之后、NAT 改写之前，自己调用 `nat_merge_clamp_mss()` 钳 MSS
+  （逐字节移植自 `tc_mss.bpf.c` 的 v4 路径，含 TCP option 遍历和 L4 校验和修正）。
+
+效果：WAN ingress / egress 各少一个程序、一次 tail call、一次报文解析（约 1.5~2µs/包）。
+
+注意：
+
+- MTU 通过 `land_mss_cfg` 传递，因为 MSS 阶段由链路服务挂载、NAT 由 NAT 服务挂载，两者
+  拿不到同一份配置；
+- 打开后 XDP 侧也不再有 MSS 钳制（本机未启用 XDP，无影响）；
+- 和 `LANDSCAPE_NAT_FASTPATH` 可以叠加：fast path 命中的包本来也不走 MSS，SYN 走慢路径
+  时由 NAT 程序钳制；
+- 想回退：去掉环境变量重启，MSS 阶段会重新挂载。
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。
