@@ -490,6 +490,42 @@ bpftool prog show | grep tc_wan_egress_route  # run_time 应下降
   时由 NAT 程序钳制；
 - 想回退：去掉环境变量重启，MSS 阶段会重新挂载。
 
+## 合并 v4 防火墙（`LANDSCAPE_NAT_MERGE_FIREWALL=1`，实验）
+
+打开后：
+
+- `attach_tc_firewall()` **只跳过 StageFamily::V4**，v6 防火墙阶段照常挂载；
+- NAT 程序在 `tc_nat_read4()` 之后、NAT 改写之前查同一张 pinned `firewall_block_ip4_map`：
+  - WAN egress 查**目的地址**（`dst_addr`），命中 `TC_ACT_SHOT`；
+  - WAN ingress 查**源地址**（`src_addr`），命中 `TC_ACT_SHOT`；
+- 语义和原 `tc_firewall.bpf.c` 完全一致（`prefixlen = 32`，只做丢弃，不产生 mark/事件）。
+
+### 利
+
+- 每个方向少一个程序 + 一次 tail call + 一次报文解析，约 **1.5~2µs/包**；
+- 规则仍然实时：用的是**同一张 pinned map**，UI 里加/删黑名单下一个包就生效，不需要重挂；
+- 能和 `LANDSCAPE_NAT_MERGE_MSS` 叠加。
+
+### 弊 / 风险
+
+| 风险 | 说明 |
+|---|---|
+| **v4 防火墙依赖 NAT 程序** | 合并后黑名单检查在 NAT 程序里；NAT 服务停掉或没挂载时，**v4 黑名单完全失效**。v6 不受影响，仍走独立阶段 |
+| **只覆盖 IPv4** | v6 还是独立程序，两套逻辑从此分开维护，上游改防火墙时得同步改 `merge_fw.h` |
+| **只实现丢弃** | 原阶段将来若扩展动作（mark、ringbuf 事件），合并版不会跟着有 |
+| **map 规格耦合** | `merge_fw.h` 里重新声明了 `firewall_block_ip4_map`（同规格：LPM_TRIE/65535/NO_PREALLOC）；上游改 `max_entries` 或 flags 时两边要一起改，否则 `pin_and_reuse_map` 会失败导致 NAT 挂载失败 |
+| **和 fast path 的关系** | fast path 命中的包本来就不经过 firewall（既有行为，不是这次引入的） |
+
+### 验证
+
+```sh
+# 只剩 v6 防火墙程序，v4 的应该没了
+bpftool prog show | grep tc_firewall
+
+# 加一条黑名单，确认立即生效
+# WebUI 加一个 IP 后，在 LAN 侧 curl 它应超时；删掉后恢复
+```
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。

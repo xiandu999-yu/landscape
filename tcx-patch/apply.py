@@ -1062,13 +1062,15 @@ def main() -> None:
         "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h",
         "const volatile __u8 land_nat_fastpath = 0;\n",
         "const volatile __u8 land_nat_fastpath = 0;\n"
-        "const volatile __u8 land_nat_merge_mss = 0;\n",
+        "const volatile __u8 land_nat_merge_mss = 0;\n"
+        "const volatile __u8 land_nat_merge_fw = 0;\n",
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
         "#define LAND_NAT_FAST 1\n",
         "#define LAND_NAT_FAST 1\n"
-        '#include "nat_v4/merge_mss.h"\n',
+        '#include "nat_v4/merge_mss.h"\n'
+        '#include "nat_v4/merge_fw.h"\n',
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
@@ -1077,7 +1079,9 @@ def main() -> None:
         "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n"
         "        goto chain;\n"
         "\n"
-        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n",
+        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n"
+        "    if (land_nat_merge_fw && nat_merge_fw4(skb, dst_addr) == TC_ACT_SHOT)\n"
+        "        return TC_ACT_SHOT;\n",
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
@@ -1086,7 +1090,9 @@ def main() -> None:
         "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_WAN))\n"
         "        goto chain;\n"
         "\n"
-        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n",
+        "    if (land_nat_merge_mss) nat_merge_clamp_mss(skb, current_l3_offset);\n"
+        "    if (land_nat_merge_fw && nat_merge_fw4(skb, src_addr) == TC_ACT_SHOT)\n"
+        "        return TC_ACT_SHOT;\n",
     )
     patch(
         "landscape-ebpf/src/lib.rs",
@@ -1264,6 +1270,66 @@ def main() -> None:
         "        pin_and_reuse_map(&mut open_skel.maps.flow_match_map, &paths.flow_match_map),\n"
         "        \"tc_wan_egress pin flow_match_map\"\n"
         "    )?;\n",
+    )
+
+    # 12) Merge the v4 firewall stage into NAT (LANDSCAPE_NAT_MERGE_FIREWALL=1).
+    #     The v4 firewall program is skipped; NAT does the same LPM lookup on the
+    #     shared pinned `firewall_block_ip4_map`. The v6 stage is still attached.
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "        rodata.land_nat_merge_mss = if merge_mss { 1 } else { 0 };\n",
+        "        rodata.land_nat_merge_mss = if merge_mss { 1 } else { 0 };\n"
+        "        let merge_fw = std::env::var(\"LANDSCAPE_NAT_MERGE_FIREWALL\")\n"
+        "            .map(|v| {\n"
+        "                matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "            })\n"
+        "            .unwrap_or(false);\n"
+        "        rodata.land_nat_merge_fw = if merge_fw { 1 } else { 0 };\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.land_mss_cfg, &paths.land_mss_cfg)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.land_mss_cfg, &paths.land_mss_cfg)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.firewall_block_ip4_map, &paths.firewall_ipv4_block)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/mod.rs",
+        "/// Publish the link MTU so the NAT programs can clamp MSS.\n",
+        "/// Merged firewall mode: the v4 firewall stage is skipped and NAT performs\n"
+        "/// the block-list lookup itself (`LANDSCAPE_NAT_MERGE_FIREWALL=1`).\n"
+        "pub(crate) fn merge_firewall_enabled() -> bool {\n"
+        "    std::env::var(\"LANDSCAPE_NAT_MERGE_FIREWALL\")\n"
+        "        .map(|v| {\n"
+        "            matches!(v.trim().to_ascii_lowercase().as_str(), \"1\" | \"true\" | \"on\" | \"yes\")\n"
+        "        })\n"
+        "        .unwrap_or(false)\n"
+        "}\n"
+        "\n"
+        "/// Publish the link MTU so the NAT programs can clamp MSS.\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/firewall.rs",
+        "        (StageFamily::V6, skel.progs.tc_firewall_wan_ingress_v6.as_fd().as_raw_fd()),\n"
+        "    ] {\n"
+        "        dp.tc().inject_from_wan(",
+        "        (StageFamily::V6, skel.progs.tc_firewall_wan_ingress_v6.as_fd().as_raw_fd()),\n"
+        "    ] {\n"
+        "        if crate::maps::nat::merge_firewall_enabled() && matches!(family, StageFamily::V4) {\n"
+        "            continue;\n"
+        "        }\n"
+        "        dp.tc().inject_from_wan(",
+    )
+    patch(
+        "landscape-ebpf/src/stages/firewall.rs",
+        "        (StageFamily::V6, skel.progs.tc_firewall_wan_egress_v6.as_fd().as_raw_fd()),\n"
+        "    ] {\n"
+        "        dp.tc().inject_from_lan(",
+        "        (StageFamily::V6, skel.progs.tc_firewall_wan_egress_v6.as_fd().as_raw_fd()),\n"
+        "    ] {\n"
+        "        if crate::maps::nat::merge_firewall_enabled() && matches!(family, StageFamily::V4) {\n"
+        "            continue;\n"
+        "        }\n"
+        "        dp.tc().inject_from_lan(",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
