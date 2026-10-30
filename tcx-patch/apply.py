@@ -1573,21 +1573,6 @@ def main() -> None:
         "const volatile u32 current_l3_offset = 14;\n"
         "const volatile __u8 land_nat_fast_ingress = 0;\n",
     )
-    patch(
-        "landscape-ebpf/src/bpf/tc_wan_ingress_intro.bpf.c",
-        "    int handoff_ret = xdp_handoff_check(skb, false);\n"
-        "    if (handoff_ret != TC_ACT_OK) return handoff_ret;\n",
-        "    int handoff_ret = xdp_handoff_check(skb, false);\n"
-        "    if (handoff_ret != TC_ACT_OK) return handoff_ret;\n"
-        "\n"
-        "    /* Must run before any packet pointer is captured: the helpers below\n"
-        "     * invalidate pkt pointers, so a later hook makes the verifier lose\n"
-        "     * the type of the already-loaded skb->data. */\n"
-        "    if (land_nat_fast_ingress) {\n"
-        "        int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
-        "        if (fast == TC_ACT_REDIRECT) return fast;\n"
-        "    }\n",
-    )
     # 16) Ingress fast path plumbing: shared pinned fa4_fast_wan + env gate.
     patch(
         "landscape-ebpf/src/lib.rs",
@@ -1695,6 +1680,46 @@ def main() -> None:
         "        crate::bpf_ctx!(\n"
         "            pin_and_reuse_map(&mut open_skel.maps.fa4_fast_wan, &paths.fa4_fast_wan),\n"
         '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        "        )?;\n",
+    )
+    # Ingress fast path is served from the per-link ingress ROOT program: its
+    # body is tiny, so clang does not fold skb->data address arithmetic across
+    # the fast path (the intro tripped
+    # "dereference of modified ctx ptr R2 off=76 disallowed").
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_root.bpf.c",
+        '#include "chain/tc_cb.h"\n',
+        '#include "chain/tc_cb.h"\n'
+        '#include "nat_v4/nat_fast_wan.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_root.bpf.c",
+        "const volatile u32 current_chain = 0;\n",
+        "const volatile u32 current_chain = 0;\n"
+        "const volatile __u8 land_nat_fast_ingress = 0;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_root.bpf.c",
+        "int tc_wan_ingress_root(struct __sk_buff *skb) {\n"
+        "    tc_cb_ingress_stamp(skb, current_l3_offset, current_chain);\n",
+        "int tc_wan_ingress_root(struct __sk_buff *skb) {\n"
+        "    if (land_nat_fast_ingress) {\n"
+        "        int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
+        "        if (fast == TC_ACT_REDIRECT) return fast;\n"
+        "    }\n"
+        "    tc_cb_ingress_stamp(skb, current_l3_offset, current_chain);\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/wan_link/tc.rs",
+        "        ingress_open_skel.maps.rodata_data.as_deref_mut().unwrap().current_chain =\n"
+        "            link_chain_id as u32;\n",
+        "        ingress_open_skel.maps.rodata_data.as_deref_mut().unwrap().current_chain =\n"
+        "            link_chain_id as u32;\n"
+        "        ingress_open_skel.maps.rodata_data.as_deref_mut().unwrap().land_nat_fast_ingress =\n"
+        "            if crate::maps::nat::fast_ingress_enabled() { 1 } else { 0 };\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
+        "            &backbone.paths().fa4_fast_wan,\n"
         "        )?;\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
