@@ -1486,6 +1486,104 @@ def main() -> None:
         "    int rc = napt_lan_state(skb, &view, src_addr, dst_addr, &new_addr, &new_port, 0);\n"
         "    bench_sink_add(rc == TC_ACT_SHOT ? 1 : BENCH_FAIL);\n",
     )
+    # 15) WAN->LAN fast path (LANDSCAPE_NAT_FASTPATH_INGRESS).
+    #     NAT stashes the pre-NAT tuple in cb[2..4]; the route stage records the
+    #     entry once it knows the egress ifindex and MAC; the ingress intro
+    #     serves it. Lifetime is a short per-protocol TTL (5s UDP / 10s QUIC /
+    #     15s TCP) so expiry re-validates through the slow path.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_rodata.h",
+        "const volatile __u8 land_nat_merge_fw = 0;\n",
+        "const volatile __u8 land_nat_merge_fw = 0;\n"
+        "const volatile __u8 land_nat_fast_ingress = 0;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "#define LAND_NAT_FAST 1\n",
+        "#define LAND_NAT_FAST 1\n"
+        "#define LAND_NAT_FAST_WAN 1\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        '#include "nat_v4/merge_mss.h"\n',
+        '#include "nat_v4/merge_mss.h"\n'
+        '#include "nat_v4/nat_fast_wan.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    } else {\n"
+        "        rc = napt_modify(skb, new_addr, new_port, LAND_FRAG_FROM_WAN, view.l3_offset);\n"
+        "    }\n"
+        "    if (rc == TC_ACT_SHOT) return TC_ACT_SHOT;\n"
+        "    if (rc != TC_ACT_OK) goto chain;\n"
+        "\n"
+        "chain:\n",
+        "    } else {\n"
+        "        rc = napt_modify(skb, new_addr, new_port, LAND_FRAG_FROM_WAN, view.l3_offset);\n"
+        "    }\n"
+        "    if (rc == TC_ACT_SHOT) return TC_ACT_SHOT;\n"
+        "    if (rc != TC_ACT_OK) goto chain;\n"
+        "\n"
+        "    if (land_nat_fast_ingress && land_nat_event_driven_get() &&\n"
+        "        (view.l4_protocol == IPV4_PROTO_TCP || view.l4_protocol == IPV4_PROTO_UDP) &&\n"
+        "        !napt_is_icmp_error(&view) && !napt_is_non_initial(&view)) {\n"
+        "        nat_fast_wan_stash(skb, view.sport, view.dport, dst_addr, view.l4_protocol);\n"
+        "    }\n"
+        "\n"
+        "chain:\n",
+    )
+    # route stage: first occurrence is tc_route4_lan_redirect_check_in_wan
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "                ret = store_mac_v4(skb, mac_value->mac, lan_info->mac_addr);\n"
+        "                if (!ret) {\n"
+        "                    return bpf_redirect(lan_info->ifindex, 0);\n"
+        "                }\n",
+        "                ret = store_mac_v4(skb, mac_value->mac, lan_info->mac_addr);\n"
+        "                if (!ret) {\n"
+        "                    __be16 rport = 0, eport = 0;\n"
+        "                    __be32 wan_addr = 0;\n"
+        "                    __u8 proto = 0;\n"
+        "                    if (nat_fast_wan_take(skb, &rport, &eport, &wan_addr, &proto)) {\n"
+        "                        nat_fast_wan_record(context->saddr, rport, wan_addr, eport, proto,\n"
+        "                                            context->daddr,\n"
+        "                                            nat_fast_wan_dport(skb, current_l3_offset),\n"
+        "                                            lan_info->ifindex, mac_value->mac,\n"
+        "                                            lan_info->mac_addr);\n"
+        "                    }\n"
+        "                    return bpf_redirect(lan_info->ifindex, 0);\n"
+        "                }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        '#include "base/landscape.h"\n',
+        '#include "base/landscape.h"\n'
+        '#include "nat_v4/nat_fast_wan.h"\n',
+    )
+    # ingress intro: consult the table before the trie dispatch
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_intro.bpf.c",
+        '#include "map/wan_trie.h"\n',
+        '#include "map/wan_trie.h"\n'
+        '#include "nat_v4/nat_fast_wan.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_intro.bpf.c",
+        "const volatile u32 current_l3_offset = 14;\n",
+        "const volatile u32 current_l3_offset = 14;\n"
+        "const volatile __u8 land_nat_fast_ingress = 0;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_intro.bpf.c",
+        "    if (is_ipv4) {\n"
+        "        if ((u64)current_l3_offset + sizeof(struct iphdr) > MAX_OFFSET) return TC_ACT_OK;\n",
+        "    if (is_ipv4) {\n"
+        "        if (land_nat_fast_ingress) {\n"
+        "            int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
+        "            if (fast == TC_ACT_REDIRECT) return fast;\n"
+        "        }\n"
+        "        if ((u64)current_l3_offset + sizeof(struct iphdr) > MAX_OFFSET) return TC_ACT_OK;\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
