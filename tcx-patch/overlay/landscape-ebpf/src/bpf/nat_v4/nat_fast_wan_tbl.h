@@ -36,6 +36,13 @@ static __always_inline void nat_wan_ctl_add(__u32 idx) {
     if (slot) __sync_fetch_and_add(slot, 1);
 }
 
+/* Stores the last early-exit reason (slot 7) and returns the program action. */
+static __always_inline int nat_wan_ctl_set(__u32 idx, __u64 val) {
+    __u64 *slot = bpf_map_lookup_elem(&nat_wan_ctl, &idx);
+    if (slot) *slot = val;
+    return TC_ACT_OK;
+}
+
 static __always_inline __u64 nat_wan_gen(void) {
     __u32 k = 0;
     __u64 *slot = bpf_map_lookup_elem(&nat_wan_ctl, &k);
@@ -68,32 +75,41 @@ static __always_inline void nat_fast_wan_record(__be32 remote_addr, __be16 remot
 }
 
 /* Returns TC_ACT_REDIRECT when served from the table, TC_ACT_OK otherwise. */
+#define NAT_WAN_EXIT_HDR 1
+#define NAT_WAN_EXIT_VER 2
+#define NAT_WAN_EXIT_IHL 3
+#define NAT_WAN_EXIT_FRAG 4
+#define NAT_WAN_EXIT_PROTO 5
+#define NAT_WAN_EXIT_L4 6
+
 static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off) {
     nat_wan_ctl_add(4);
     char *data = (char *)(long)skb->data;
     char *data_end = (char *)(long)skb->data_end;
     struct iphdr *iph = (void *)(data + l3_off);
-    if ((char *)(iph + 1) > data_end) return TC_ACT_OK;
-    if (iph->version != 4) return TC_ACT_OK;
+    if ((char *)(iph + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_HDR);
+    if (iph->version != 4) return nat_wan_ctl_set(7, NAT_WAN_EXIT_VER);
 
     __u32 ihl = ((__u32)iph->ihl) * 4U;
-    if (ihl < IPV4_HDR_MIN_LEN || ihl > IPV4_HDR_MAX_LEN) return TC_ACT_OK;
-    if (iph->frag_off & bpf_htons(0x3FFF)) return TC_ACT_OK;
+    if (ihl < IPV4_HDR_MIN_LEN || ihl > IPV4_HDR_MAX_LEN)
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_IHL);
+    if (iph->frag_off & bpf_htons(0x3FFF)) return nat_wan_ctl_set(7, NAT_WAN_EXIT_FRAG);
 
     __u8 proto = iph->protocol;
-    if (proto != IPV4_PROTO_TCP && proto != IPV4_PROTO_UDP) return TC_ACT_OK;
+    if (proto != IPV4_PROTO_TCP && proto != IPV4_PROTO_UDP)
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_PROTO);
 
     __u32 l4_off = l3_off + ihl;
     __be16 sport;
     __be16 dport;
     if (proto == IPV4_PROTO_TCP) {
         struct tcphdr *th = (void *)(data + l4_off);
-        if ((char *)(th + 1) > data_end) return TC_ACT_OK;
+        if ((char *)(th + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_L4);
         sport = th->source;
         dport = th->dest;
     } else {
         struct udphdr *uh = (void *)(data + l4_off);
-        if ((char *)(uh + 1) > data_end) return TC_ACT_OK;
+        if ((char *)(uh + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_L4);
         sport = uh->source;
         dport = uh->dest;
     }
