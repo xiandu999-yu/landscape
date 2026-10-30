@@ -84,40 +84,34 @@ static __always_inline void nat_fast_wan_record(__be32 remote_addr, __be16 remot
 
 static __always_inline int nat_fast_wan_try(struct __sk_buff *skb, __u32 l3_off) {
     nat_wan_ctl_add(4);
-    char *data = (char *)(long)skb->data;
-    char *data_end = (char *)(long)skb->data_end;
-    struct iphdr *iph = (void *)(data + l3_off);
-    if ((char *)(iph + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_HDR);
-    if (iph->version != 4) return nat_wan_ctl_set(7, NAT_WAN_EXIT_VER);
 
-    __u32 ihl = ((__u32)iph->ihl) * 4U;
+    /* Helper-based parse: skb->data may not be linear for every packet
+     * (large GSO segments, non-linear receive), which made the direct
+     * data_end checks reject everything with NAT_WAN_EXIT_L4. */
+    struct iphdr iph;
+    if (bpf_skb_load_bytes(skb, l3_off, &iph, sizeof(iph)))
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_HDR);
+    if (iph.version != 4) return nat_wan_ctl_set(7, NAT_WAN_EXIT_VER);
+
+    __u32 ihl = ((__u32)iph.ihl) * 4U;
     if (ihl < IPV4_HDR_MIN_LEN || ihl > IPV4_HDR_MAX_LEN)
         return nat_wan_ctl_set(7, NAT_WAN_EXIT_IHL);
-    if (iph->frag_off & bpf_htons(0x3FFF)) return nat_wan_ctl_set(7, NAT_WAN_EXIT_FRAG);
+    if (iph.frag_off & bpf_htons(0x3FFF)) return nat_wan_ctl_set(7, NAT_WAN_EXIT_FRAG);
 
-    __u8 proto = iph->protocol;
+    __u8 proto = iph.protocol;
     if (proto != IPV4_PROTO_TCP && proto != IPV4_PROTO_UDP)
         return nat_wan_ctl_set(7, NAT_WAN_EXIT_PROTO);
 
-    __u32 l4_off = l3_off + ihl;
-    __be16 sport;
-    __be16 dport;
-    if (proto == IPV4_PROTO_TCP) {
-        struct tcphdr *th = (void *)(data + l4_off);
-        if ((char *)(th + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_L4);
-        sport = th->source;
-        dport = th->dest;
-    } else {
-        struct udphdr *uh = (void *)(data + l4_off);
-        if ((char *)(uh + 1) > data_end) return nat_wan_ctl_set(7, NAT_WAN_EXIT_L4);
-        sport = uh->source;
-        dport = uh->dest;
-    }
+    __be16 ports[2] = {};
+    if (bpf_skb_load_bytes(skb, l3_off + ihl, ports, sizeof(ports)))
+        return nat_wan_ctl_set(7, NAT_WAN_EXIT_L4);
+    __be16 sport = ports[0];
+    __be16 dport = ports[1];
 
     nat_wan_ctl_add(5);
     struct nat_fast_wan_key key = {};
-    key.remote_addr = iph->saddr;
-    key.wan_addr = iph->daddr;
+    key.remote_addr = iph.saddr;
+    key.wan_addr = iph.daddr;
     key.remote_port = sport;
     key.external_port = dport;
     key.proto = proto;
