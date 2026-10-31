@@ -1721,6 +1721,145 @@ def main() -> None:
         "            &backbone.paths().fa4_fast_wan,\n"
         "        )?;\n",
     )
+    # 18) Share nat_wan_ctl + periodic 5s sweep of the ingress fast-path table.
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n',
+        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n'
+        'pub(crate) const NAT_WAN_CTL_PIN: &str = "nat_wan_ctl";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
+        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
+        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `nat_wan_ctl`: ingress fast-path counters (8 x u64).\n"
+        "pub(crate) const NAT_WAN_CTL_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: NAT_WAN_CTL_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 8,\n"
+        "    max_entries: 8,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `nat_wan_ctl` array at `path`.\n"
+        "pub fn init_nat_wan_ctl(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&NAT_WAN_CTL_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub fa4_fast_wan: PathBuf,\n",
+        "    pub fa4_fast_wan: PathBuf,\n"
+        "    pub nat_wan_ctl: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n",
+        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n"
+        "            nat_wan_ctl: root.join(nat::NAT_WAN_CTL_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n',
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n'
+        '    nat::init_nat_wan_ctl(&paths.nat_wan_ctl).expect("init nat_wan_ctl failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n',
+        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n'
+        '    nat::init_nat_wan_ctl(&paths.nat_wan_ctl).expect("test init nat_wan_ctl");\n',
+    )
+    patch(
+        "landscape-ebpf/src/route_backbone.rs",
+        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        "        )?;\n",
+        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        "        )?;\n"
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(&mut open_skel.maps.nat_wan_ctl, &paths.nat_wan_ctl),\n"
+        '            "tc_wan_ingress_route pin nat_wan_ctl"\n'
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/wan_link/tc.rs",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
+        "            &backbone.paths().fa4_fast_wan,\n"
+        "        )?;\n",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
+        "            &backbone.paths().fa4_fast_wan,\n"
+        "        )?;\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.nat_wan_ctl,\n"
+        "            &backbone.paths().nat_wan_ctl,\n"
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/mod.rs",
+        "pub(crate) mod types;\n",
+        "mod sweep;\n"
+        "pub(crate) mod types;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        "const ARP_SYNC_INTERVAL_SECS: u64 = 10;\n",
+        "const ARP_SYNC_INTERVAL_SECS: u64 = 10;\n"
+        "/// Fast-path table sweep cadence (each pass is hard-capped at 2s).\n"
+        "const FAST_SWEEP_INTERVAL_SECS: u64 = 5;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        "    loop {\n"
+        '        tracing::info!("sync current arp info");\n'
+        "        sync_arp_table_to_ebpf_map(&paths, &netlink_handle).await;\n"
+        "\n"
+        '        tracing::info!("sync current ipv6 neigh info");\n'
+        "        sync_neigh_v6_table_to_ebpf_map(&paths, &netlink_handle).await;\n"
+        "\n"
+        "        tokio::select! {\n"
+        "            _ = cancel.cancelled() => {\n"
+        '                tracing::info!("neigh_update service stopping...");\n'
+        "                conn_task.abort();\n"
+        "                return Ok(());\n"
+        "            }\n"
+        "            _ = tokio::time::sleep(Duration::from_secs(ARP_SYNC_INTERVAL_SECS)) => {}\n"
+        "        }\n"
+        "    }\n",
+        "    let mut tick: u64 = 0;\n"
+        "    loop {\n"
+        "        // ARP reconcile keeps its 10s cadence; the fast-path sweep runs\n"
+        "        // on every tick (5s).\n"
+        "        if tick % 2 == 0 {\n"
+        '            tracing::info!("sync current arp info");\n'
+        "            sync_arp_table_to_ebpf_map(&paths, &netlink_handle).await;\n"
+        "\n"
+        '            tracing::info!("sync current ipv6 neigh info");\n'
+        "            sync_neigh_v6_table_to_ebpf_map(&paths, &netlink_handle).await;\n"
+        "        }\n"
+        "        super::sweep::sweep_fast_wan(&paths);\n"
+        "        tick = tick.wrapping_add(1);\n"
+        "\n"
+        "        tokio::select! {\n"
+        "            _ = cancel.cancelled() => {\n"
+        '                tracing::info!("neigh_update service stopping...");\n'
+        "                conn_task.abort();\n"
+        "                return Ok(());\n"
+        "            }\n"
+        "            _ = tokio::time::sleep(Duration::from_secs(FAST_SWEEP_INTERVAL_SECS)) => {}\n"
+        "        }\n"
+        "    }\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
