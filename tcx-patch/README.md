@@ -1,4 +1,4 @@
-# Landscape TCX patch (baseline v0.27.2)
+# Landscape TCX patch (baseline v0.28.0)
 
 把 `landscape-ebpf` 的 TC 入口（`tc_wan_ingress_intro` / `tc_wan_egress_route` /
 `tc_lan_ingress_route` / `tc_lan_dao`）从 clsact 过滤器换成可选的 **TCX bpf_link**，
@@ -64,7 +64,7 @@ ldd  /usr/bin/landscape-webserver        # 应报 "not a dynamic executable"
    `can't open file '.../patch/tcx-patch/apply.py'`。新版 workflow 已用
    `find` 自动定位 `apply.py`，但仍建议保持上面的标准目录。
 
-3. 在 Actions 里手动运行 `build-tcx`，`baseline` 填 `v0.27.2`。
+3. 在 Actions 里手动运行 `build-tcx`，`baseline` 填 `v0.28.0`。
 4. 产物：`landscape-webserver-<arch>-tcx`、`redirect_pkg_handler-<arch>-tcx`。
 
 工作流会：checkout 上游 tag → 应用 overlay → `scripts/setup_ubuntu_build.sh`
@@ -249,7 +249,7 @@ UI 上超时字段用两列 `n-grid` 排布（每行两个），比原来五列�
 einat 的 `timeout_fragment = "5s"` 没有直接对应：Landscape 只用
 `napt_is_non_initial()` 识别非首片，不做 einat 那样的 frag 端口记忆。
 
-**补充（0.27.2 已有）**：`tc_nat4_v4.bpf.c` 里对 ICMP error 调用
+**补充（0.28.0 已有）**：`tc_nat4_v4.bpf.c` 里对 ICMP error 调用
 `napt_modify_icmp_error()`（翻译内嵌包），对非首片调用 `napt_modify_fragment()`，
 所以 traceroute/PMTU 和分片并不是缺失项；本补丁没有改动这两条路径。
 
