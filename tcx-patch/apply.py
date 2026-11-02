@@ -1860,6 +1860,98 @@ def main() -> None:
         "        }\n"
         "    }\n",
     )
+    # 19) Make ver/state real: NAT deletes the flow_core record when the CT
+    #     dies, and a neighbour change bumps the generation.
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        '#include "nat_v4/merge_mss.h"\n#include "nat_v4/flow_core.h"\n',
+        '#include "nat_v4/merge_mss.h"\n'
+        '#include "nat_v4/tc_nat4_rodata.h"\n'
+        '#include "nat_v4/flow_core.h"\n'
+        '#include "nat_v4/flow_core_tbl.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        '#include "nat_v4/tc_nat4_rodata.h"\n#include "nat_v4/tc_modify_head.h"\n',
+        '#include "nat_v4/tc_modify_head.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/nat4_ct_timer.h",
+        "static __always_inline u32 napt_ct_delete(struct napt_ct_key *key) {\n"
+        "    bpf_map_delete_elem(&napt_ct, key);\n",
+        "static __always_inline u32 napt_ct_delete(struct napt_ct_key *key) {\n"
+        "#ifdef LAND_NAT_FAST_WAN\n"
+        "    /* The WAN2LAN record is keyed by the WAN-side tuple; rebuild it from\n"
+        "     * the CT (remote side + external port) so the record dies with it. */\n"
+        "    struct napt_ct_value *fc_v = bpf_map_lookup_elem(&napt_ct, key);\n"
+        "    if (fc_v) {\n"
+        "        struct flow_core_key fc_k = {};\n"
+        "        fc_k.saddr = key->remote_addr;\n"
+        "        fc_k.daddr = land_nat_external_addr;\n"
+        "        fc_k.sport = key->remote_port;\n"
+        "        fc_k.dport = fc_v->external_port;\n"
+        "        fc_k.proto = key->proto;\n"
+        "        fc_k.dir = FLOW_CORE_DIR_WAN2LAN;\n"
+        "        bpf_map_delete_elem(&flow_core, &fc_k);\n"
+        "    }\n"
+        "#endif\n"
+        "    bpf_map_delete_elem(&napt_ct, key);\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.flow_core, &paths.flow_core)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.nat_wan_ctl, &paths.nat_wan_ctl)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        "const FAST_SWEEP_INTERVAL_SECS: u64 = 5;\n",
+        "const FAST_SWEEP_INTERVAL_SECS: u64 = 60;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        "        Ok(stats) => {\n"
+        "            tracing::debug!(\n"
+        '                "sync arpv4 info finished: deleted={}, upserted={}",\n'
+        "                stats.deleted,\n"
+        "                stats.upserted\n"
+        "            );\n"
+        "        }\n",
+        "        Ok(stats) => {\n"
+        "            tracing::debug!(\n"
+        '                "sync arpv4 info finished: deleted={}, upserted={}",\n'
+        "                stats.deleted,\n"
+        "                stats.upserted\n"
+        "            );\n"
+        "            if stats.deleted > 0 || stats.upserted > 0 {\n"
+        "                bump_flow_generation(paths);\n"
+        "            }\n"
+        "        }\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        "pub async fn sync_arp_table_to_ebpf_map(paths: &LandscapeMapPath, handle: &rtnetlink::Handle) {\n",
+        "/// Neighbours changed: make every flow_core record stale so the next\n"
+        "/// packet revalidates through the slow path.\n"
+        "fn bump_flow_generation(paths: &LandscapeMapPath) {\n"
+        "    let Ok(map) = libbpf_rs::MapHandle::from_pinned_path(&paths.nat_wan_ctl) else {\n"
+        "        return;\n"
+        "    };\n"
+        "    let key = 0u32.to_ne_bytes();\n"
+        "    let Ok(Some(value)) = map.lookup(&key, MapFlags::ANY) else { return };\n"
+        "    if value.len() < 8 {\n"
+        "        return;\n"
+        "    }\n"
+        "    let cur = u64::from_ne_bytes([\n"
+        "        value[0], value[1], value[2], value[3], value[4], value[5], value[6], value[7],\n"
+        "    ]);\n"
+        "    let next = cur.wrapping_add(1).to_ne_bytes();\n"
+        "    let _ = map.update(&key, &next, MapFlags::ANY);\n"
+        "}\n"
+        "\n"
+        "pub async fn sync_arp_table_to_ebpf_map(paths: &LandscapeMapPath, handle: &rtnetlink::Handle) {\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 

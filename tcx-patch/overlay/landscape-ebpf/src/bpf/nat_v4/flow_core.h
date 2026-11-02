@@ -77,10 +77,13 @@ static __always_inline int flow_core_take(struct __sk_buff *skb, __be16 *sport, 
     return 1;
 }
 
+/* Correctness no longer depends on this: the NAT stage deletes the record when
+ * the CT dies and a neighbour change bumps the generation, so the TTL is just a
+ * safety net / memory reclamation trigger. */
 static __always_inline __u64 flow_core_ttl(__u8 proto, __be16 dport) {
-    if (proto == IPV4_PROTO_TCP) return 15ULL * 1000000000ULL;
-    if (dport == bpf_htons(443)) return 10ULL * 1000000000ULL; /* QUIC */
-    return 5ULL * 1000000000ULL;
+    if (proto == IPV4_PROTO_TCP) return 120ULL * 1000000000ULL;
+    if (dport == bpf_htons(443)) return 60ULL * 1000000000ULL; /* QUIC */
+    return 60ULL * 1000000000ULL;
 }
 
 /* Destination port as it is *now* (post-NAT): the internal port. */

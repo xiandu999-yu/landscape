@@ -557,13 +557,12 @@ WAN→LAN 方向，和出向对称：
 
 寿命：TCP 15s / QUIC(443) 10s / 其它 UDP 5s，**硬过期不刷新**——到期那个包回慢路径，顺带续 CT。
 
-状态：BPF + Rust 接线完成，`LANDSCAPE_NAT_FASTPATH_INGRESS=1` 后生效（默认关）。
+状态：`flow_core` 核心区已上线，`LANDSCAPE_NAT_FASTPATH_INGRESS=1` 后生效（默认关）。
 
-尚未实现（靠 TTL 兜底）：
-
-- `napt_ct_delete` 里不删入向条目——条目寿命 5/10/15 秒，CT 到期后最多残留这么久；
-- 指标模式切到非 off 时不清表——记录闸门会关，已存在的条目在寿命内自然过期；
-- generation（`nat_wan_ctl`）目前只在记录时取数、命中时比对，**还没有任何代码去 bump 它**，所以 MAC/网口变化只能靠 TTL（≤15 秒）兜底。
+- 条目带 `state`（`FLOW_CORE_STATE_COMPLETE`）和 `ver`；命中要求两者都有效，否则回慢路径；
+- `napt_ct_delete()` 按 CT 反推出 WAN 侧 key 并删除条目 —— 端口复用不会再错投；
+- 邻居增/删/改时 `bump_flow_generation()` 自增 `nat_wan_ctl[0]`，所有条目立即失效；
+- 寿命改为 TCP 120s / QUIC 60s / UDP 60s（只作安全网）；5 秒扫描降为 60 秒兜底。
 
 ## 已知限制 / 下一步
 
