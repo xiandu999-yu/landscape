@@ -16,7 +16,7 @@ use libbpf_rs::MapCore as _;
 /// Hard cap on the wall time of one pass.
 pub(crate) const FAST_SWEEP_BUDGET_MS: u128 = 2000;
 
-// `nat_fast_wan_value` offsets (bpf/nat_v4/nat_fast_wan.h).
+// `flow_core_value` offsets (bpf/nat_v4/flow_core.h).
 const OFF_INTERNAL_ADDR: usize = 0;
 const OFF_OUT_IFINDEX: usize = 4;
 const OFF_DST_MAC: usize = 24;
@@ -38,7 +38,7 @@ fn u32_at(buf: &[u8], off: usize) -> u32 {
 pub(crate) fn sweep_fast_wan(paths: &LandscapeMapPath) -> (usize, usize) {
     use std::time::Instant;
 
-    let fast = match libbpf_rs::MapHandle::from_pinned_path(&paths.fa4_fast_wan) {
+    let fast = match libbpf_rs::MapHandle::from_pinned_path(&paths.flow_core) {
         Ok(map) => map,
         Err(_) => return (0, 0),
     };

@@ -1507,7 +1507,7 @@ def main() -> None:
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
         '#include "nat_v4/merge_mss.h"\n',
         '#include "nat_v4/merge_mss.h"\n'
-        '#include "nat_v4/nat_fast_wan.h"\n',
+        '#include "nat_v4/flow_core.h"\n',
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
@@ -1527,7 +1527,7 @@ def main() -> None:
         "    if (land_nat_fast_ingress && land_nat_event_driven_get() &&\n"
         "        (view.l4_protocol == IPV4_PROTO_TCP || view.l4_protocol == IPV4_PROTO_UDP) &&\n"
         "        !napt_is_icmp_error(&view) && !napt_is_non_initial(&view)) {\n"
-        "        nat_fast_wan_stash(skb, view.sport, view.dport, dst_addr, view.l4_protocol);\n"
+        "        flow_core_stash(skb, view.sport, view.dport, dst_addr, view.l4_protocol);\n"
         "    }\n"
         "\n"
         "chain:\n",
@@ -1545,10 +1545,10 @@ def main() -> None:
         "                    __be16 rport = 0, eport = 0;\n"
         "                    __be32 wan_addr = 0;\n"
         "                    __u8 proto = 0;\n"
-        "                    if (nat_fast_wan_take(skb, &rport, &eport, &wan_addr, &proto)) {\n"
-        "                        nat_fast_wan_record(context->saddr, rport, wan_addr, eport, proto,\n"
+        "                    if (flow_core_take(skb, &rport, &eport, &wan_addr, &proto)) {\n"
+        "                        flow_core_record_wan(context->saddr, rport, wan_addr, eport, proto,\n"
         "                                            context->daddr,\n"
-        "                                            nat_fast_wan_dport(skb, current_l3_offset),\n"
+        "                                            flow_core_dport(skb, current_l3_offset),\n"
         "                                            lan_info->ifindex, mac_value->mac,\n"
         "                                            lan_info->mac_addr);\n"
         "                    }\n"
@@ -1560,9 +1560,9 @@ def main() -> None:
         "landscape-ebpf/src/bpf/route/route4_path.h",
         '#include "base/landscape.h"\n',
         '#include "base/landscape.h"\n'
-        '#include "nat_v4/nat_fast_wan.h"\n'
+        '#include "nat_v4/flow_core.h"\n'
         '#ifdef LAND_NAT_FAST_WAN\n'
-        '#include "nat_v4/nat_fast_wan_tbl.h"\n'
+        '#include "nat_v4/flow_core_tbl.h"\n'
         '#endif\n',
     )
     patch(
@@ -1583,24 +1583,24 @@ def main() -> None:
         "const volatile u32 current_l3_offset = 14;\n"
         "const volatile __u8 land_nat_fast_ingress = 0;\n",
     )
-    # 16) Ingress fast path plumbing: shared pinned fa4_fast_wan + env gate.
+    # 16) Ingress fast path plumbing: shared pinned flow_core + env gate.
     patch(
         "landscape-ebpf/src/lib.rs",
         "    pub fa4_stats: PathBuf,\n",
         "    pub fa4_stats: PathBuf,\n"
-        "    pub fa4_fast_wan: PathBuf,\n",
+        "    pub flow_core: PathBuf,\n",
     )
     patch(
         "landscape-ebpf/src/lib.rs",
         "            fa4_stats: root.join(nat::FA4_STATS_PIN),\n",
         "            fa4_stats: root.join(nat::FA4_STATS_PIN),\n"
-        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n",
+        "            flow_core: root.join(nat::FLOW_CORE_PIN),\n",
     )
     patch(
         "landscape-ebpf/src/maps/nat/init.rs",
         'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n',
         'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n'
-        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n',
+        'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n',
     )
     patch(
         "landscape-ebpf/src/maps/nat/init.rs",
@@ -1613,10 +1613,10 @@ def main() -> None:
         "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
         "}\n"
         "\n"
-        "/// `fa4_fast_wan`: ingress fast-path table (key 16, value 40).\n"
-        "pub(crate) const FA4_FAST_WAN_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "/// `flow_core`: ingress fast-path table (key 16, value 40).\n"
+        "pub(crate) const FLOW_CORE_SPEC: MapCreateSpec = MapCreateSpec {\n"
         "    map_type: MapType::Hash,\n"
-        "    name: FA4_FAST_WAN_PIN,\n"
+        "    name: FLOW_CORE_PIN,\n"
         "    key_size: 16,\n"
         "    value_size: 40,\n"
         "    max_entries: 32768,\n"
@@ -1624,22 +1624,22 @@ def main() -> None:
         "    inner: None,\n"
         "};\n"
         "\n"
-        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
-        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
-        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "/// Create or reuse the pinned `flow_core` hash at `path`.\n"
+        "pub fn init_flow_core(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_SPEC, path)\n"
         "}\n",
     )
     patch(
         "landscape-ebpf/src/maps/mod.rs",
         '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n',
         '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n'
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("init flow_core failed");\n',
     )
     patch(
         "landscape-ebpf/src/maps/mod.rs",
         '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n',
         '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n'
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("test init flow_core");\n',
     )
     patch(
         "landscape-ebpf/src/maps/nat/mod.rs",
@@ -1676,8 +1676,8 @@ def main() -> None:
         '        let mut open_skel = bpf_ctx!(builder.open(obj), "open tc_wan_ingress_route skeleton")?;\n',
         '        let mut open_skel = bpf_ctx!(builder.open(obj), "open tc_wan_ingress_route skeleton")?;\n'
         "        crate::bpf_ctx!(\n"
-        "            pin_and_reuse_map(&mut open_skel.maps.fa4_fast_wan, &paths.fa4_fast_wan),\n"
-        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        "            pin_and_reuse_map(&mut open_skel.maps.flow_core, &paths.flow_core),\n"
+        '            "tc_wan_ingress_route pin flow_core"\n'
         "        )?;\n",
     )
     # Ingress fast path is served from the per-link ingress ROOT program: its
@@ -1689,7 +1689,7 @@ def main() -> None:
         '#include "chain/tc_cb.h"\n',
         '#include "chain/tc_cb.h"\n'
         '#define LAND_NAT_FAST_WAN 1\n'
-        '#include "nat_v4/nat_fast_wan_tbl.h"\n',
+        '#include "nat_v4/flow_core_tbl.h"\n',
     )
     patch(
         "landscape-ebpf/src/bpf/tc_wan_ingress_root.bpf.c",
@@ -1703,7 +1703,7 @@ def main() -> None:
         "    tc_cb_ingress_stamp(skb, current_l3_offset, current_chain);\n",
         "int tc_wan_ingress_root(struct __sk_buff *skb) {\n"
         "    if (land_nat_fast_ingress) {\n"
-        "        int fast = nat_fast_wan_try(skb, current_l3_offset);\n"
+        "        int fast = flow_core_try_wan(skb, current_l3_offset);\n"
         "        if (fast == TC_ACT_REDIRECT) return fast;\n"
         "    }\n"
         "    tc_cb_ingress_stamp(skb, current_l3_offset, current_chain);\n",
@@ -1717,26 +1717,26 @@ def main() -> None:
         "        ingress_open_skel.maps.rodata_data.as_deref_mut().unwrap().land_nat_fast_ingress =\n"
         "            if crate::maps::nat::fast_ingress_enabled() { 1 } else { 0 };\n"
         "        pin_and_reuse_map(\n"
-        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
-        "            &backbone.paths().fa4_fast_wan,\n"
+        "            &mut ingress_open_skel.maps.flow_core,\n"
+        "            &backbone.paths().flow_core,\n"
         "        )?;\n",
     )
     # 18) Share nat_wan_ctl + periodic 5s sweep of the ingress fast-path table.
     patch(
         "landscape-ebpf/src/maps/nat/init.rs",
-        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n',
-        'pub(crate) const FA4_FAST_WAN_PIN: &str = "fa4_fast_wan";\n'
+        'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n',
+        'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n'
         'pub(crate) const NAT_WAN_CTL_PIN: &str = "nat_wan_ctl";\n',
     )
     patch(
         "landscape-ebpf/src/maps/nat/init.rs",
-        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
-        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
-        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "/// Create or reuse the pinned `flow_core` hash at `path`.\n"
+        "pub fn init_flow_core(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_SPEC, path)\n"
         "}\n",
-        "/// Create or reuse the pinned `fa4_fast_wan` hash at `path`.\n"
-        "pub fn init_fa4_fast_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
-        "    ensure_pinned_map(&FA4_FAST_WAN_SPEC, path)\n"
+        "/// Create or reuse the pinned `flow_core` hash at `path`.\n"
+        "pub fn init_flow_core(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_SPEC, path)\n"
         "}\n"
         "\n"
         "/// `nat_wan_ctl`: ingress fast-path counters (8 x u64).\n"
@@ -1757,33 +1757,33 @@ def main() -> None:
     )
     patch(
         "landscape-ebpf/src/lib.rs",
-        "    pub fa4_fast_wan: PathBuf,\n",
-        "    pub fa4_fast_wan: PathBuf,\n"
+        "    pub flow_core: PathBuf,\n",
+        "    pub flow_core: PathBuf,\n"
         "    pub nat_wan_ctl: PathBuf,\n",
     )
     patch(
         "landscape-ebpf/src/lib.rs",
-        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n",
-        "            fa4_fast_wan: root.join(nat::FA4_FAST_WAN_PIN),\n"
+        "            flow_core: root.join(nat::FLOW_CORE_PIN),\n",
+        "            flow_core: root.join(nat::FLOW_CORE_PIN),\n"
         "            nat_wan_ctl: root.join(nat::NAT_WAN_CTL_PIN),\n",
     )
     patch(
         "landscape-ebpf/src/maps/mod.rs",
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n',
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("init fa4_fast_wan failed");\n'
+        '    nat::init_flow_core(&paths.flow_core).expect("init flow_core failed");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("init flow_core failed");\n'
         '    nat::init_nat_wan_ctl(&paths.nat_wan_ctl).expect("init nat_wan_ctl failed");\n',
     )
     patch(
         "landscape-ebpf/src/maps/mod.rs",
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n',
-        '    nat::init_fa4_fast_wan(&paths.fa4_fast_wan).expect("test init fa4_fast_wan");\n'
+        '    nat::init_flow_core(&paths.flow_core).expect("test init flow_core");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("test init flow_core");\n'
         '    nat::init_nat_wan_ctl(&paths.nat_wan_ctl).expect("test init nat_wan_ctl");\n',
     )
     patch(
         "landscape-ebpf/src/route_backbone.rs",
-        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        '            "tc_wan_ingress_route pin flow_core"\n'
         "        )?;\n",
-        '            "tc_wan_ingress_route pin fa4_fast_wan"\n'
+        '            "tc_wan_ingress_route pin flow_core"\n'
         "        )?;\n"
         "        crate::bpf_ctx!(\n"
         "            pin_and_reuse_map(&mut open_skel.maps.nat_wan_ctl, &paths.nat_wan_ctl),\n"
@@ -1793,12 +1793,12 @@ def main() -> None:
     patch(
         "landscape-ebpf/src/chain/wan_link/tc.rs",
         "        pin_and_reuse_map(\n"
-        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
-        "            &backbone.paths().fa4_fast_wan,\n"
+        "            &mut ingress_open_skel.maps.flow_core,\n"
+        "            &backbone.paths().flow_core,\n"
         "        )?;\n",
         "        pin_and_reuse_map(\n"
-        "            &mut ingress_open_skel.maps.fa4_fast_wan,\n"
-        "            &backbone.paths().fa4_fast_wan,\n"
+        "            &mut ingress_open_skel.maps.flow_core,\n"
+        "            &backbone.paths().flow_core,\n"
         "        )?;\n"
         "        pin_and_reuse_map(\n"
         "            &mut ingress_open_skel.maps.nat_wan_ctl,\n"

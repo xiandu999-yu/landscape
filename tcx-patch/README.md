@@ -551,7 +551,7 @@ WAN→LAN 方向，和出向对称：
 | 环节 | 谁负责 | 做什么 |
 |---|---|---|
 | NAT (`tc_v4_from_wan`) | NAT | 改写成功后把 pre-NAT 元组塞进 `skb->cb[2..4]`：`cb2=(远端端口<<16)|外部端口`、`cb3=magic|proto<<16`、`cb4=原始目的地址` |
-| route（`_in_wan` 的 `store_mac_v4` 成功分支） | LAN 侧 | 取 cb + `lan_info->ifindex` + `mac_value->mac` + `lan_info->mac_addr`，写 `fa4_fast_wan` 全条 |
+| route（`_in_wan` 的 `store_mac_v4` 成功分支） | LAN 侧 | 取 cb + `lan_info->ifindex` + `mac_value->mac` + `lan_info->mac_addr`，写 `flow_core` 全条 |
 | intro (`tc_wan_ingress_intro`) | 入口 | 查表命中 → `napt_modify(FROM_WAN)` 改目的 + 写两个 MAC + `bpf_redirect(ifindex)` |
 | `napt_ct_delete` | NAT | （下一步）按 external_port 反推入向 key 一并删除 |
 
