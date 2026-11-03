@@ -43,12 +43,6 @@ static __always_inline int flow_core_ctl_set(__u32 idx, __u64 val) {
     return TC_ACT_OK;
 }
 
-static __always_inline __u64 flow_core_ver(void) {
-    __u32 k = 0;
-    __u64 *slot = bpf_map_lookup_elem(&nat_wan_ctl, &k);
-    return slot ? *slot : 0;
-}
-
 /* WAN2LAN record: written by the route stage once it knows the destination. */
 static __always_inline void flow_core_record_wan(__be32 remote_addr, __be16 remote_port,
                                                  __be32 wan_addr, __be16 external_port,
