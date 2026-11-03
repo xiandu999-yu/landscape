@@ -1868,7 +1868,7 @@ def main() -> None:
         '#include "nat_v4/merge_mss.h"\n'
         '#include "nat_v4/tc_nat4_rodata.h"\n'
         '#include "nat_v4/flow_core.h"\n'
-        '#include "nat_v4/flow_core_tbl.h"\n',
+        '#include "nat_v4/flow_core_map.h"\n',
     )
     patch(
         "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
