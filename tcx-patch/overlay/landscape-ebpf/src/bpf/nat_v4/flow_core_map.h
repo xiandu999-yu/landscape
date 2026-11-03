@@ -7,6 +7,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "nat_v4/flow_core.h"
+#include "nat_v4/flow_ver.h"
 
 /*
  * The core table plus its counters.
