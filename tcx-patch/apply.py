@@ -1952,6 +1952,124 @@ def main() -> None:
         "\n"
         "pub async fn sync_arp_table_to_ebpf_map(paths: &LandscapeMapPath, handle: &rtnetlink::Handle) {\n",
     )
+    # 20) Per-LAN-interface generation: the neigh_update kprobe bumps only the
+    #     slot of the interface whose neighbour changed, so records of other
+    #     LAN interfaces stay valid.
+    patch(
+        "landscape-ebpf/src/bpf/neigh_update.bpf.c",
+        '#include "neigh/neigh_ip6.h"\n',
+        '#include "neigh/neigh_ip6.h"\n'
+        '#include "nat_v4/flow_ver.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/neigh_update.bpf.c",
+        "    u16 family = BPF_CORE_READ(n, ops, family);\n",
+        "    u16 family = BPF_CORE_READ(n, ops, family);\n"
+        "    /* Neighbour changed on this interface: invalidate only its records. */\n"
+        "    flow_core_ver_bump(ifindex);\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n',
+        'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n'
+        'pub(crate) const FLOW_CORE_VER_PIN: &str = "flow_core_ver";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `flow_core` hash at `path`.\n"
+        "pub fn init_flow_core(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `flow_core` hash at `path`.\n"
+        "pub fn init_flow_core(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `flow_core_ver`: per-LAN-interface generation (1024 x u64).\n"
+        "pub(crate) const FLOW_CORE_VER_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: FLOW_CORE_VER_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 8,\n"
+        "    max_entries: 1024,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `flow_core_ver` array at `path`.\n"
+        "pub fn init_flow_core_ver(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_VER_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub flow_core: PathBuf,\n",
+        "    pub flow_core: PathBuf,\n"
+        "    pub flow_core_ver: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            flow_core: root.join(nat::FLOW_CORE_PIN),\n",
+        "            flow_core: root.join(nat::FLOW_CORE_PIN),\n"
+        "            flow_core_ver: root.join(nat::FLOW_CORE_VER_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_flow_core(&paths.flow_core).expect("init flow_core failed");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("init flow_core failed");\n'
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("init flow_core_ver failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_flow_core(&paths.flow_core).expect("test init flow_core");\n',
+        '    nat::init_flow_core(&paths.flow_core).expect("test init flow_core");\n'
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("test init flow_core_ver");\n',
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.flow_core, &paths.flow_core)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.flow_core, &paths.flow_core)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.flow_core_ver, &paths.flow_core_ver)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/route_backbone.rs",
+        '            "tc_wan_ingress_route pin flow_core"\n'
+        "        )?;\n",
+        '            "tc_wan_ingress_route pin flow_core"\n'
+        "        )?;\n"
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(&mut open_skel.maps.flow_core_ver, &paths.flow_core_ver),\n"
+        '            "tc_wan_ingress_route pin flow_core_ver"\n'
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/wan_link/tc.rs",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.flow_core,\n"
+        "            &backbone.paths().flow_core,\n"
+        "        )?;\n",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.flow_core,\n"
+        "            &backbone.paths().flow_core,\n"
+        "        )?;\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.flow_core_ver,\n"
+        "            &backbone.paths().flow_core_ver,\n"
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mac/setting.rs",
+        '        pin_and_reuse_map(&mut open_skel.maps.ip_mac_v6, &paths.ip_mac_v6),\n'
+        '        "neigh_update prepare ip_mac_v6 failed"\n'
+        '    )?;\n',
+        '        pin_and_reuse_map(&mut open_skel.maps.ip_mac_v6, &paths.ip_mac_v6),\n'
+        '        "neigh_update prepare ip_mac_v6 failed"\n'
+        '    )?;\n'
+        '    crate::bpf_ctx!(\n'
+        '        pin_and_reuse_map(&mut open_skel.maps.flow_core_ver, &paths.flow_core_ver),\n'
+        '        "neigh_update prepare flow_core_ver failed"\n'
+        '    )?;\n',
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 

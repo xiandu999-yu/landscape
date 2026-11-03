@@ -7,6 +7,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "nat_v4/flow_core.h"
+#include "nat_v4/flow_ver.h"
 #include "nat_v4/tc_modify_head.h"
 
 /*
@@ -69,7 +70,7 @@ static __always_inline void flow_core_record_wan(__be32 remote_addr, __be16 remo
     __builtin_memcpy(value.dst_mac, dst_mac, 6);
     __builtin_memcpy(value.src_mac, src_mac, 6);
     value.deadline_ns = bpf_ktime_get_ns() + flow_core_ttl(proto, external_port);
-    value.ver = (__u32)flow_core_ver();
+    value.ver = (__u32)flow_core_ver_get(out_ifindex);
     value.state = FLOW_CORE_STATE_COMPLETE;
 
     bpf_map_update_elem(&flow_core, &key, &value, BPF_ANY);
@@ -125,7 +126,8 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
         return TC_ACT_OK;
     }
     /* Only a complete, current record may skip the chain. */
-    if (value->state != FLOW_CORE_STATE_COMPLETE || value->ver != (__u32)flow_core_ver()) {
+    if (value->state != FLOW_CORE_STATE_COMPLETE ||
+        value->ver != (__u32)flow_core_ver_get(value->out_ifindex)) {
         bpf_map_delete_elem(&flow_core, &key);
         return TC_ACT_OK;
     }
