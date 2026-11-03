@@ -2070,6 +2070,103 @@ def main() -> None:
         '        "neigh_update prepare flow_core_ver failed"\n'
         '    )?;\n',
     )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "use crate::maps::{MapCreateSpec, ensure_pinned_map};\n",
+        "use crate::maps::{MapCreateSpec, ensure_pinned_map, recreate_pinned_map};\n",
+    )
+    # 21) Point 2: validate the record against the external-port mapping table.
+    #     napt_from_wan is recreated on every start (stale mappings must never
+    #     survive a reboot) and shared with the ingress fast path.
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FLOW_CORE_VER_PIN: &str = "flow_core_ver";\n',
+        'pub(crate) const FLOW_CORE_VER_PIN: &str = "flow_core_ver";\n'
+        'pub(crate) const NAPT_FROM_WAN_PIN: &str = "napt_from_wan";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `flow_core_ver` array at `path`.\n"
+        "pub fn init_flow_core_ver(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_VER_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `flow_core_ver` array at `path`.\n"
+        "pub fn init_flow_core_ver(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_VER_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `napt_from_wan`: external port -> internal mapping (3 * 65536 * 32B).\n"
+        "pub(crate) const NAPT_FROM_WAN_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: NAPT_FROM_WAN_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 32,\n"
+        "    max_entries: 3 * 65536,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Always recreate: a mapping from a previous boot must not be trusted.\n"
+        "pub fn init_napt_from_wan(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    recreate_pinned_map(&NAPT_FROM_WAN_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub flow_core_ver: PathBuf,\n",
+        "    pub flow_core_ver: PathBuf,\n"
+        "    pub napt_from_wan: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            flow_core_ver: root.join(nat::FLOW_CORE_VER_PIN),\n",
+        "            flow_core_ver: root.join(nat::FLOW_CORE_VER_PIN),\n"
+        "            napt_from_wan: root.join(nat::NAPT_FROM_WAN_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("init flow_core_ver failed");\n',
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("init flow_core_ver failed");\n'
+        '    nat::init_napt_from_wan(&paths.napt_from_wan).expect("init napt_from_wan failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("test init flow_core_ver");\n',
+        '    nat::init_flow_core_ver(&paths.flow_core_ver).expect("test init flow_core_ver");\n'
+        '    nat::init_napt_from_wan(&paths.napt_from_wan).expect("test init napt_from_wan");\n',
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.flow_core_ver, &paths.flow_core_ver)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.flow_core_ver, &paths.flow_core_ver)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.napt_from_wan, &paths.napt_from_wan)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/route_backbone.rs",
+        '            "tc_wan_ingress_route pin flow_core_ver"\n'
+        "        )?;\n",
+        '            "tc_wan_ingress_route pin flow_core_ver"\n'
+        "        )?;\n"
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(&mut open_skel.maps.napt_from_wan, &paths.napt_from_wan),\n"
+        '            "tc_wan_ingress_route pin napt_from_wan"\n'
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/wan_link/tc.rs",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.flow_core_ver,\n"
+        "            &backbone.paths().flow_core_ver,\n"
+        "        )?;\n",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.flow_core_ver,\n"
+        "            &backbone.paths().flow_core_ver,\n"
+        "        )?;\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.napt_from_wan,\n"
+        "            &backbone.paths().napt_from_wan,\n"
+        "        )?;\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
