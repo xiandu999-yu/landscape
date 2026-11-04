@@ -2197,6 +2197,15 @@ def main() -> None:
         "        maps::flow_wanip::add_wan_ip_mark(&self.rt.paths, flow_id, ips);\n"
         "        maps::nat::flush_fast_caches(&self.rt.paths);\n",
     )
+    # 23) Virtual NIC zone: a zone that is deliberately ignored by the network
+    #     config generator (no /etc/config/network entry, no bridge, no DHCP).
+    patch(
+        "landscape-common/src/config_service/iface/config.rs",
+        "#[default]\n    Undefined,\n    Wan,\n    Lan,\n}\n",
+        "#[default]\n    Undefined,\n    Wan,\n    Lan,\n"
+        "    /// User-created tunnel/veth/netkit device (managed outside OpenWrt).\n"
+        "    Virtual,\n}\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
