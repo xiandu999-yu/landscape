@@ -614,7 +614,21 @@ WebUI 同步：
   route target；`FlowTarget::Virtual { name }` 映射到同一 owner，分流出口新增
   「SOCKS5 虚拟网卡」类型。当前只注册 IPv4。
 - 设备名不能是 `socks5`，避免无辨识度；默认用 `landscape`。
-- 当前尚未启动 SOCKS5 用户态转发器；设备建好后由后续转发器接入。
+- 设备创建后启动内置 TCP/IPv4 转发器：
+  - 转发器线程通过 `setns` 进入设备 netns，用 `IP_TRANSPARENT` 绑定 `1080`；
+  - TC ingress eBPF 程序（`socks5_tproxy.bpf.c`）挂在 netns peer 上，用
+    `bpf_skc_lookup_tcp` 找到 1080 listener，再 `bpf_sk_assign` 把 skb 交给
+    它；**不用 nftables/TPROXY 规则**；
+  - 透明 socket 的 local address 就是原目标；
+  - netns 代理直接连上游 SOCKS5；源地址 10.255.0.2 由 Landscape 现有 WAN
+    NAT 做 SNAT，不需要额外 NAT/masquerade；
+  - 上游是 `127.0.0.1`/`localhost` 时，自动在 host 侧起纯 TCP 中继
+    `10.255.0.1:1082 -> 127.0.0.1:<配置端口>`，netns 代理改为连这个中继；
+    本地 SOCKS5 服务不需要监听 0.0.0.0；
+  - **整条链路不使用 nftables**；
+  - UDP 和 IPv6 暂不支持；
+  - 日志走 Landscape 主 tracing 日志。
+- 设备删除时 stop 转发线程，TC hook 随线程销毁。
 
 ## 已知限制 / 下一步
 

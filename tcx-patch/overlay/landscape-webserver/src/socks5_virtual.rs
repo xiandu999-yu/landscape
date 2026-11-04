@@ -5,10 +5,28 @@
 //! or OpenWrt configuration is touched.
 
 use std::{
+    ffi::CString,
+    fs::File,
+    mem::MaybeUninit,
     net::Ipv4Addr,
+    os::fd::AsRawFd,
     path::PathBuf,
     process::Command,
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread::JoinHandle,
+    time::Duration,
+};
+
+use landscape_ebpf::{
+    landscape::TcHookProxy,
+    skel::socks5_tproxy::Socks5TproxySkelBuilder,
+};
+use libbpf_rs::TC_INGRESS;
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, oneshot},
+    task::JoinHandle as TokioJoinHandle,
 };
 
 use axum::extract::State;
@@ -24,8 +42,6 @@ use landscape_common::{
     service::controller::ConfigStoreController,
     sys_service::route_service::{RouteOwner, RouteTargetInfo, WanRouteTarget},
 };
-use tokio::sync::Mutex;
-
 use crate::{
     LandscapeApp,
     api::{JsonBody, LandscapeApiResp},
@@ -36,11 +52,24 @@ const SOCKS5_CONFIG_FILE: &str = "socks5-virtual.json";
 const HOST_ADDR: &str = "10.255.0.1/24";
 const PEER_ADDR: &str = "10.255.0.2/24";
 const PEER_GATEWAY: &str = "10.255.0.1";
+const PROXY_PORT: u16 = 1080;
+const LOOPBACK_RELAY_PORT: u16 = 1082;
+
+struct ProxyThread {
+    shutdown: Option<oneshot::Sender<()>>,
+    join: JoinHandle<()>,
+}
+
+struct ProxyRuntime {
+    thread: ProxyThread,
+    relay: Option<TokioJoinHandle<()>>,
+}
 
 #[derive(Clone)]
 pub struct Socks5VirtualService {
     home_path: Arc<PathBuf>,
     inner: Arc<Mutex<Option<Socks5VirtualConfig>>>,
+    proxy_thread: Arc<Mutex<Option<ProxyRuntime>>>,
 }
 
 impl Socks5VirtualService {
@@ -62,6 +91,7 @@ impl Socks5VirtualService {
         Self {
             home_path: Arc::new(home_path),
             inner: Arc::new(Mutex::new(inner)),
+            proxy_thread: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -129,6 +159,20 @@ impl Socks5VirtualService {
             tracing::warn!(device = host, "SOCKS5 virtual device is not visible in netlink; route target not registered");
         }
 
+        let proxy = match start_proxy(&config).await {
+            Ok(child) => child,
+            Err(error) => {
+                route
+                    .remove_ipv4_wan_route(&RouteOwner::Netns(host.clone()))
+                    .await;
+                cleanup_link(&config);
+                let _ = iface.delete(host).await;
+                let _ = std::fs::remove_file(self.config_path());
+                return Err(DbError::Internal(error));
+            }
+        };
+        *self.proxy_thread.lock().await = Some(proxy);
+
         *guard = Some(config.clone());
         Ok(config)
     }
@@ -142,6 +186,16 @@ impl Socks5VirtualService {
         let Some(config) = guard.take() else {
             return Ok(());
         };
+
+        if let Some(mut runtime) = self.proxy_thread.lock().await.take() {
+            if let Some(relay) = runtime.relay.take() {
+                relay.abort();
+            }
+            if let Some(shutdown) = runtime.thread.shutdown.take() {
+                let _ = shutdown.send(());
+            }
+            let _ = runtime.thread.join.join();
+        }
 
         route
             .remove_ipv4_wan_route(&RouteOwner::Netns(config.host_name().to_string()))
@@ -163,6 +217,136 @@ impl Socks5VirtualService {
         }
         let bytes = serde_json::to_vec_pretty(config).map_err(|error| error.to_string())?;
         std::fs::write(&path, bytes).map_err(|error| error.to_string())
+    }
+}
+
+fn is_loopback_server(server: &str) -> bool {
+    let server = server.trim();
+    if server.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    server
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+async fn start_proxy(config: &Socks5VirtualConfig) -> Result<ProxyRuntime, String> {
+    let mut proxy_config = config.clone();
+    let relay = if is_loopback_server(&config.server) {
+        let listener = TcpListener::bind((Ipv4Addr::new(10, 255, 0, 1), LOOPBACK_RELAY_PORT))
+            .await
+            .map_err(|error| format!("failed to bind SOCKS5 loopback relay: {error}"))?;
+        let upstream_port = config.port;
+        let task = tokio::spawn(async move {
+            if let Err(error) =
+                crate::socks5_proxy::serve_tcp_relay(listener, upstream_port).await
+            {
+                tracing::error!(%error, "SOCKS5 loopback relay stopped");
+            }
+        });
+        proxy_config.server = "10.255.0.1".to_string();
+        proxy_config.port = LOOPBACK_RELAY_PORT;
+        Some(task)
+    } else {
+        None
+    };
+
+    let thread = match spawn_proxy_thread(&proxy_config) {
+        Ok(thread) => thread,
+        Err(error) => {
+            if let Some(relay) = relay.as_ref() {
+                relay.abort();
+            }
+            return Err(error);
+        }
+    };
+    Ok(ProxyRuntime { thread, relay })
+}
+
+fn spawn_proxy_thread(config: &Socks5VirtualConfig) -> Result<ProxyThread, String> {
+    let netns = config.netns_name();
+    let config = config.clone();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let join = std::thread::spawn(move || {
+        let mut ready_tx = Some(ready_tx);
+        let result = (|| -> Result<(), String> {
+            let fd = File::open(format!("/var/run/netns/{netns}"))
+                .map_err(|error| format!("failed to open netns {netns}: {error}"))?;
+            let changed = unsafe { libc::setns(fd.as_raw_fd(), libc::CLONE_NEWNET) };
+            if changed != 0 {
+                return Err(format!(
+                    "failed to enter netns {netns}: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut open_object = MaybeUninit::uninit();
+            let builder = Socks5TproxySkelBuilder::default();
+            let mut open_skel = builder
+                .open(&mut open_object)
+                .map_err(|error| format!("failed to open tproxy skeleton: {error}"))?;
+            let rodata = open_skel
+                .maps
+                .rodata_data
+                .as_deref_mut()
+                .ok_or_else(|| "tproxy rodata is not mapped".to_string())?;
+            rodata.proxy_port = PROXY_PORT.to_be();
+            let skel = open_skel
+                .load()
+                .map_err(|error| format!("failed to load tproxy skeleton: {error}"))?;
+
+            let peer = CString::new(config.peer_name())
+                .map_err(|error| format!("invalid peer name: {error}"))?;
+            let ifindex = unsafe { libc::if_nametoindex(peer.as_ptr()) };
+            if ifindex == 0 {
+                return Err(format!(
+                    "peer interface {} not found in {netns}",
+                    config.peer_name()
+                ));
+            }
+            let mut hook = TcHookProxy::new(
+                &skel.progs.socks5_tproxy_ingress,
+                ifindex as i32,
+                TC_INGRESS,
+                1,
+            );
+            hook.attach();
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("failed to build proxy runtime: {error}"))?;
+            runtime.block_on(async {
+                let listener = crate::socks5_proxy::bind_transparent(PROXY_PORT)
+                    .map_err(|error| format!("failed to bind proxy port {PROXY_PORT}: {error}"))?;
+                if let Some(tx) = ready_tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
+                crate::socks5_proxy::serve(listener, config, shutdown_rx)
+                    .await
+                    .map_err(|error| format!("proxy serve failed: {error}"))
+            })
+        })();
+        if let Err(error) = result {
+            if let Some(tx) = ready_tx.take() {
+                let _ = tx.send(Err(error));
+            }
+        }
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(2)) {
+        Ok(Ok(())) => Ok(ProxyThread { shutdown: Some(shutdown_tx), join }),
+        Ok(Err(error)) => {
+            let _ = join.join();
+            Err(error)
+        }
+        Err(error) => {
+            let _ = shutdown_tx.send(());
+            let _ = join.join();
+            Err(format!("SOCKS5 proxy did not start: {error}"))
+        }
     }
 }
 

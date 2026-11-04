@@ -78,9 +78,11 @@ def main() -> None:
         "landscape-ebpf/src/tcx.rs",
         "landscape-ebpf/src/landscape.rs",
         "landscape-ebpf/src/bpf/proc_match.bpf.c",
+        "landscape-ebpf/src/bpf/socks5_tproxy.bpf.c",
         "landscape-ebpf/src/proc_match.rs",
         "landscape-common/src/config_service/iface/socks5.rs",
         "landscape-webserver/src/socks5_virtual.rs",
+        "landscape-webserver/src/socks5_proxy.rs",
         "landscape-webui/src/components/iface/BridgeCreateModal.vue",
         "landscape-webui/src/components/flow/match/FlowMatchRule.vue",
         "landscape-webui/src/components/flow/FlowEntryRuleExhibit.vue",
@@ -2256,15 +2258,19 @@ def main() -> None:
         fail(f"missing {HERE / 'socks5_virtual_patch.py'}")
     if not (HERE / "flow_virtual_target_patch.py").is_file():
         fail(f"missing {HERE / 'flow_virtual_target_patch.py'}")
+    if not (HERE / "socks5_proxy_patch.py").is_file():
+        fail(f"missing {HERE / 'socks5_proxy_patch.py'}")
     from local_proc_patch import apply_local_proc_patch
     from local_proc_dataplane_patch import apply_local_proc_dataplane_patch
     from socks5_virtual_patch import apply_socks5_virtual_patch
     from flow_virtual_target_patch import apply_flow_virtual_target_patch
+    from socks5_proxy_patch import apply_socks5_proxy_patch
 
     apply_local_proc_patch(patch)
     apply_local_proc_dataplane_patch(patch)
     apply_socks5_virtual_patch(patch)
     apply_flow_virtual_target_patch(patch)
+    apply_socks5_proxy_patch(patch)
     print(f"TCX overlay applied (overlay={OVERLAY})")
     return
 
