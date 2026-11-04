@@ -578,18 +578,18 @@ WebUI 同步：
 
 ### 本机程序分流（配置/UI 第一版，数据面待接）
 
-- `FlowEntryMatchMode` 新增 `Local { process }`；`ProcessFilter` 支持
-  `include`（正选/白名单）和 `exclude`（反选/黑名单），按 Linux `comm`
-  匹配（最长 15 字节）。
-- 正反选只决定进程名单是白名单还是黑名单，不参与 flow 选择、`flow_id`
-  或优先级；多 flow 的先后仍按原有 flow 机制处理。
+- `FlowEntryMatchMode` 新增 `Local { inverse, bypass_process }`，JSON 形状为
+  `{"t":"local","inverse":false,"bypass_process":["mihomo",...]}`；按 Linux
+  `comm` 匹配（最长 15 字节）。
+- `inverse=false` 是正选（只匹配名单内进程），`inverse=true` 是反选
+  （排除名单内进程）。正反选只处理名单，不参与 flow 选择、`flow_id` 或优先级。
 - 前端「分流入口匹配规则」新增「本机程序」类型，进程名用 tag 输入；入口
   展示为「正选/反选: 进程列表」。
 - 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型
   `flow_match_map`，WebServer 加载到该规则时会打 warning；eBPF
   cgroup/进程识别和虚拟网卡出口在后续补丁接入。
-- 注意：`ProcessFilter.names` 在 OpenAPI 中是可选字段，前端展示时必须
-  判空（已在 `FlowEntryRuleExhibit.vue` 处理）。
+- 注意：`bypass_process` 在 OpenAPI 中是可选字段，前端展示时必须判空
+  （已在 `FlowEntryRuleExhibit.vue` 处理）。
 
 ## 已知限制 / 下一步
 

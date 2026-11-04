@@ -2240,7 +2240,18 @@ def main() -> None:
         '    type_docker: "Docker",\n',
         '    type_docker: "Virtual NIC",\n',
     )
-    # 25) Local-process flow entries: config model + WebUI.
+    # 25) Local-process flow entries: DNS-like `inverse` + `bypass_process`
+    #     shape. Implemented in local_proc_patch.py; the older inline block
+    #     below is intentionally left unreachable.
+    if not (HERE / "local_proc_patch.py").is_file():
+        fail(f"missing {HERE / 'local_proc_patch.py'}")
+    from local_proc_patch import apply_local_proc_patch
+
+    apply_local_proc_patch(patch)
+    print(f"TCX overlay applied (overlay={OVERLAY})")
+    return
+
+    # 25-legacy) Local-process flow entries: config model + WebUI.
     patch(
         "landscape-common/src/flow/config.rs",
         "#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]\n"

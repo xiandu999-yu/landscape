@@ -41,15 +41,15 @@ const label = computed(() => {
         props.rule.mode.mac_addr,
       );
     case "local": {
-      const filter = (props.rule.mode as any).process;
-      if (!filter || !filter.names || filter.names.length === 0) {
+      const mode = props.rule.mode as any;
+      const names: string[] = mode.bypass_process ?? [];
+      if (names.length === 0) {
         return t("flow.match_rule.local_all");
       }
-      const prefix =
-        String(filter.mode) === "exclude"
-          ? t("flow.match_rule.local_exclude")
-          : t("flow.match_rule.local_include");
-      return `${prefix}: ${filter.names.join(", ")}`;
+      const prefix = mode.inverse
+        ? t("flow.match_rule.local_exclude")
+        : t("flow.match_rule.local_include");
+      return `${prefix}: ${names.join(", ")}`;
     }
     default:
       return "";

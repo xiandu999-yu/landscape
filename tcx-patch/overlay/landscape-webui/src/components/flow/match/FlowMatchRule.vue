@@ -87,52 +87,49 @@ function set_mode(value: any, index: number, mode: InputMode) {
   } else {
     value.mode = {
       t: "local",
-      process: { mode: "include", names: [] },
+      inverse: false,
+      bypass_process: [],
     };
   }
   value.qos = qos;
 }
 
 function local_filter(value: any): {
-  mode: string;
-  names: string[];
+  inverse: boolean;
+  bypass_process: string[];
 } {
   if (value.mode.t !== "local") {
-    return { mode: "include", names: [] };
+    return { inverse: false, bypass_process: [] };
   }
-  const process = (value.mode as any).process;
   return {
-    mode: process?.mode ?? "include",
-    names: process?.names ?? [],
+    inverse: !!value.mode.inverse,
+    bypass_process: value.mode.bypass_process ?? [],
   };
 }
 
-function set_process_mode(value: any, mode: string) {
-  if (value.mode.t !== "local") {
-    value.mode = {
-      t: "local",
-      process: { mode, names: [] },
-    };
-    return;
-  }
-  (value.mode as any).process = {
-    ...local_filter(value),
-    mode,
+function set_process_inverse(value: any, inverse: boolean) {
+  const filter = local_filter(value);
+  value.mode = {
+    t: "local",
+    inverse,
+    bypass_process: filter.bypass_process,
   };
 }
 
 function set_process_names(value: any, names: string[]) {
-  if (value.mode.t !== "local") {
-    value.mode = {
-      t: "local",
-      process: { mode: "include", names },
-    };
-    return;
-  }
-  (value.mode as any).process = {
-    ...local_filter(value),
-    names,
+  const filter = local_filter(value);
+  value.mode = {
+    t: "local",
+    inverse: filter.inverse,
+    bypass_process: names,
   };
+}
+
+function set_process_name(value: any, index: number, name: string) {
+  const filter = local_filter(value);
+  const names = [...filter.bypass_process];
+  names[index] = name;
+  set_process_names(value, names);
 }
 </script>
 
@@ -218,24 +215,39 @@ function set_process_names(value: any, names: string[]) {
             :show-button="false"
           />
         </n-input-group>
-        <template v-else>
-          <n-select
-            :style="{ width: '96px' }"
-            :value="local_filter(value).mode"
-            :options="processModeOptions"
-            @update:value="(v: any) => set_process_mode(value, v)"
-          />
-          <n-select
-            multiple
-            filterable
-            tag
-            :options="[]"
-            :value="local_filter(value).names"
-            :placeholder="t('flow.match_rule.process_placeholder')"
-            :style="{ minWidth: '180px', flex: 1 }"
+        <n-flex v-else vertical style="flex: 1">
+          <n-flex :size="[8, 0]" align="center">
+            <n-select
+              :style="{ width: '96px' }"
+              :value="local_filter(value).inverse ? 'exclude' : 'include'"
+              :options="processModeOptions"
+              @update:value="
+                (v: any) => set_process_inverse(value, v === 'exclude')
+              "
+            />
+            <n-text depth="3" style="font-size: 12px">
+              {{ t("flow.match_rule.local_hint") }}
+            </n-text>
+          </n-flex>
+          <n-dynamic-input
+            :value="local_filter(value).bypass_process"
+            :on-create="() => ''"
             @update:value="(v: any) => set_process_names(value, v ?? [])"
-          />
-        </template>
+          >
+            <template #create-button-default>
+              {{ t("flow.match_rule.add_process") }}
+            </template>
+            <template #default="{ value: name, index: pindex }">
+              <n-input
+                :value="name"
+                :placeholder="t('flow.match_rule.process_placeholder')"
+                @update:value="
+                  (v: string) => set_process_name(value, pindex, v)
+                "
+              />
+            </template>
+          </n-dynamic-input>
+        </n-flex>
       </n-flex>
     </template>
   </n-dynamic-input>
