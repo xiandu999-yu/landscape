@@ -576,18 +576,22 @@ WebUI 同步：
 - 分流出口的目标类型里，原「Docker」分组标题改为「虚拟网卡」；`target.t === "netns"`
   的容器判定、容器名列表和 `container_name` 字段都保持不变。
 
-### 本机程序分流（配置/UI 第一版，数据面待接）
+### 本机程序分流（配置 + cgroup/skb 数据面）
 
 - `FlowEntryMatchMode` 新增 `Local { blacklist, bypass_process }`，JSON 形状为
   `{"t":"local","blacklist":false,"bypass_process":["mihomo",...]}`；按 Linux
   `comm` 匹配（最长 15 字节）。
 - `blacklist=false` 是白名单（只匹配名单内进程），`blacklist=true` 是黑名单
   （排除名单内进程）。黑白名单只处理名单，不参与 flow 选择、`flow_id` 或优先级。
-- 前端「分流入口匹配规则」新增「本机程序」类型，进程名用 tag 输入；入口
-  展示为「正选/反选: 进程列表」。
-- 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型
-  `flow_match_map`，WebServer 加载到该规则时会打 warning；eBPF
-  cgroup/进程识别和虚拟网卡出口在后续补丁接入。
+- 前端「分流入口匹配规则」新增「本机程序」类型，进程名是可增删的行列表；
+  入口按 `白名单/黑名单: 进程列表` 展示。
+- 数据面：`proc_match.bpf.c` 的 `cgroup_skb/egress` 程序在 tc 之前按 `comm`
+  查表，把命中的 flow_id 写进 `skb->mark`（`FLOW_REDIRECT` 布局），后续 WAN
+  route 继续用原有 target slot。本地 flow 按 `flow_id` 升序匹配，最多 32 条。
+- 需要 cgroup v2（`/sys/fs/cgroup`）和 `CONFIG_CGROUP_BPF`；attach 失败时
+  matcher 会被禁用并打 warning，其余数据面照常工作。
+- `resolve_flow_entry_rule` 不会把 `Local` 规则写进地址型 `flow_match_map`；
+  它们由 `proc_match.rs` 单独同步。
 - 注意：`bypass_process` 在 OpenAPI 中是可选字段，前端展示时必须判空
   （已在 `FlowEntryRuleExhibit.vue` 处理）。
 

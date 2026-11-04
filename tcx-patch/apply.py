@@ -77,6 +77,8 @@ def main() -> None:
     required = [
         "landscape-ebpf/src/tcx.rs",
         "landscape-ebpf/src/landscape.rs",
+        "landscape-ebpf/src/bpf/proc_match.bpf.c",
+        "landscape-ebpf/src/proc_match.rs",
         "landscape-webui/src/components/flow/match/FlowMatchRule.vue",
         "landscape-webui/src/components/flow/FlowEntryRuleExhibit.vue",
     ]
@@ -2245,9 +2247,13 @@ def main() -> None:
     #     below is intentionally left unreachable.
     if not (HERE / "local_proc_patch.py").is_file():
         fail(f"missing {HERE / 'local_proc_patch.py'}")
+    if not (HERE / "local_proc_dataplane_patch.py").is_file():
+        fail(f"missing {HERE / 'local_proc_dataplane_patch.py'}")
     from local_proc_patch import apply_local_proc_patch
+    from local_proc_dataplane_patch import apply_local_proc_dataplane_patch
 
     apply_local_proc_patch(patch)
+    apply_local_proc_dataplane_patch(patch)
     print(f"TCX overlay applied (overlay={OVERLAY})")
     return
 

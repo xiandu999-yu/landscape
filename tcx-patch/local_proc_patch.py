@@ -177,14 +177,9 @@ def apply_local_proc_patch(patch):
         "            qos: rule.qos,\n"
         "            mode: ResolvedFlowEntryMatchMode::Ip { ip, prefix_len },\n"
         "        }),\n"
-        "        // Local/process rules use the dedicated process matcher, not the\n"
-        "        // address-based flow_match_map; they are added there in a later step.\n"
-        "        FlowEntryMatchMode::Local { .. } => {\n"
-        "            tracing::warn!(\n"
-        "                \"local process flow rule configured, but the eBPF process matcher is not wired yet\"\n"
-        "            );\n"
-        "            None\n"
-        "        }\n"
+        "        // Local/process rules are handled by the cgroup/skb matcher;\n"
+        "        // they do not produce an entry in the address-based flow_match_map.\n"
+        "        FlowEntryMatchMode::Local { .. } => None,\n"
         "    }\n"
         "}\n",
     )
