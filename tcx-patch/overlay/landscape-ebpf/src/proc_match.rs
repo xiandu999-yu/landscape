@@ -4,7 +4,7 @@
 //! before the WAN route program runs.  This module owns the skeleton, the
 //! cgroup attachment and the map contents (process list + flow metadata).
 
-use std::os::fd::AsFd;
+use std::os::fd::AsRawFd;
 
 use landscape_common::flow::{RuntimeFlowConfig, RuntimeLocalProcessRule};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
@@ -45,7 +45,7 @@ impl ProcMatch {
         // leaves the rest of the dataplane untouched.
         let cgroup = std::fs::File::open("/sys/fs/cgroup")?;
         let link = crate::bpf_ctx!(
-            skel.progs.proc_match_egress.attach_cgroup(cgroup.as_fd()),
+            skel.progs.proc_match_egress.attach_cgroup(cgroup.as_raw_fd()),
             "attach proc_match cgroup egress"
         )?;
 
