@@ -581,6 +581,8 @@ WebUI 同步：
 - `FlowEntryMatchMode` 新增 `Local { process }`；`ProcessFilter` 支持
   `include`（正选/白名单）和 `exclude`（反选/黑名单），按 Linux `comm`
   匹配（最长 15 字节）。
+- 正反选只决定进程名单是白名单还是黑名单，不参与 flow 选择、`flow_id`
+  或优先级；多 flow 的先后仍按原有 flow 机制处理。
 - 前端「分流入口匹配规则」新增「本机程序」类型，进程名用 tag 输入；入口
   展示为「正选/反选: 进程列表」。
 - 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型

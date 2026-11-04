@@ -2249,6 +2249,9 @@ def main() -> None:
         '#[serde(rename_all = "snake_case")]\n'
         "pub enum FlowEntryMatchMode {\n",
         "/// How a `FlowEntryMatchMode::Local` process list is interpreted.\n"
+        "///\n"
+        "/// This is only positive/negative membership for the process list; it does\n"
+        "/// not carry flow priority, ordering, or `flow_id` semantics.\n"
         "#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]\n"
         '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
         '#[serde(rename_all = "snake_case")]\n'
@@ -2264,6 +2267,9 @@ def main() -> None:
         "///\n"
         "/// Matching is by Linux `comm` (the name shown in `/proc/<pid>/comm`), which\n"
         "/// is truncated to 15 bytes by the kernel.\n"
+        "///\n"
+        "/// The filter only decides whether a process belongs to this rule's set;\n"
+        "/// `mode` is not a flow priority or flow selector.\n"
         "#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Hash)]\n"
         '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
         "pub struct ProcessFilter {\n"
