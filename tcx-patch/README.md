@@ -576,6 +576,17 @@ WebUI 同步：
 - 分流出口的目标类型里，原「Docker」分组标题改为「虚拟网卡」；`target.t === "netns"`
   的容器判定、容器名列表和 `container_name` 字段都保持不变。
 
+### 本机程序分流（配置/UI 第一版，数据面待接）
+
+- `FlowEntryMatchMode` 新增 `Local { process }`；`ProcessFilter` 支持
+  `include`（正选/白名单）和 `exclude`（反选/黑名单），按 Linux `comm`
+  匹配（最长 15 字节）。
+- 前端「分流入口匹配规则」新增「本机程序」类型，进程名用 tag 输入；入口
+  展示为「正选/反选: 进程列表」。
+- 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型
+  `flow_match_map`，WebServer 加载到该规则时会打 warning；eBPF
+  cgroup/进程识别和虚拟网卡出口在后续补丁接入。
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。

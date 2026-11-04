@@ -77,6 +77,8 @@ def main() -> None:
     required = [
         "landscape-ebpf/src/tcx.rs",
         "landscape-ebpf/src/landscape.rs",
+        "landscape-webui/src/components/flow/match/FlowMatchRule.vue",
+        "landscape-webui/src/components/flow/FlowEntryRuleExhibit.vue",
     ]
     missing = [rel for rel in required if not (OVERLAY / rel).is_file()]
     if missing:
@@ -2237,6 +2239,280 @@ def main() -> None:
         "landscape-webui/src/i18n/en/flow/index.ts",
         '    type_docker: "Docker",\n',
         '    type_docker: "Virtual NIC",\n',
+    )
+    # 25) Local-process flow entries: config model + WebUI.
+    patch(
+        "landscape-common/src/flow/config.rs",
+        "#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]\n"
+        '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
+        '#[serde(tag = "t")]\n'
+        '#[serde(rename_all = "snake_case")]\n'
+        "pub enum FlowEntryMatchMode {\n",
+        "/// How a `FlowEntryMatchMode::Local` process list is interpreted.\n"
+        "#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]\n"
+        '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
+        '#[serde(rename_all = "snake_case")]\n'
+        "pub enum ProcessMatchMode {\n"
+        "    /// Positive selection: only the listed processes match (whitelist).\n"
+        "    #[default]\n"
+        "    Include,\n"
+        "    /// Negative selection: the listed processes are excluded (blacklist).\n"
+        "    Exclude,\n"
+        "}\n"
+        "\n"
+        "/// Process-name filter for locally generated traffic.\n"
+        "///\n"
+        "/// Matching is by Linux `comm` (the name shown in `/proc/<pid>/comm`), which\n"
+        "/// is truncated to 15 bytes by the kernel.\n"
+        "#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, Hash)]\n"
+        '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
+        "pub struct ProcessFilter {\n"
+        "    #[serde(default)]\n"
+        '    #[cfg_attr(feature = "openapi", schema(required = true))]\n'
+        "    pub mode: ProcessMatchMode,\n"
+        "    #[serde(default)]\n"
+        "    pub names: Vec<String>,\n"
+        "}\n"
+        "\n"
+        "#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Hash)]\n"
+        '#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]\n'
+        '#[serde(tag = "t")]\n'
+        '#[serde(rename_all = "snake_case")]\n'
+        "pub enum FlowEntryMatchMode {\n",
+    )
+    patch(
+        "landscape-common/src/flow/config.rs",
+        "    Device {\n        device_id: Uuid,\n    },\n}\n",
+        "    Device {\n        device_id: Uuid,\n    },\n"
+        "    /// Locally generated traffic (the router's own sockets).\n"
+        "    ///\n"
+        "    /// An optional process filter narrows the match to the given `comm`\n"
+        "    /// names, either as a whitelist (`Include`) or blacklist (`Exclude`).\n"
+        "    Local {\n"
+        "        #[serde(default)]\n"
+        '        #[cfg_attr(feature = "openapi", schema(required = false, nullable = true))]\n'
+        "        process: Option<ProcessFilter>,\n"
+        "    },\n"
+        "}\n",
+    )
+    patch(
+        "landscape-common/src/flow/config.rs",
+        "        }\n\n        Ok(())\n    }\n}\n\nimpl FlowEntryRule {",
+        "        }\n\n"
+        "        if let FlowEntryMatchMode::Local { process: Some(filter) } = self {\n"
+        "            let mut seen = std::collections::HashSet::new();\n"
+        "            for name in &filter.names {\n"
+        "                let name = name.trim();\n"
+        "                if name.is_empty() {\n"
+        "                    return Err(ServiceConfigError::InvalidConfig {\n"
+        '                        reason: "local process filter contains an empty process name".to_string(),\n'
+        "                    });\n"
+        "                }\n"
+        "                if name.len() > 15 {\n"
+        "                    return Err(ServiceConfigError::InvalidConfig {\n"
+        "                        reason: format!(\n"
+        '                            "local process name \'{name}\' is {} bytes; Linux comm is limited to 15",\n'
+        "                            name.len()\n"
+        "                        ),\n"
+        "                    });\n"
+        "                }\n"
+        "                if !seen.insert(name) {\n"
+        "                    return Err(ServiceConfigError::InvalidConfig {\n"
+        '                        reason: format!("duplicate local process name \'{name}\'"),\n'
+        "                    });\n"
+        "                }\n"
+        "            }\n"
+        "        }\n\n"
+        "        Ok(())\n    }\n}\n\nimpl FlowEntryRule {",
+    )
+    patch(
+        "landscape-common/src/flow/config.rs",
+        "            FlowEntryMatchMode::Device { device_id } => write!(f, \"Device {}\", device_id),\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+        "            FlowEntryMatchMode::Device { device_id } => write!(f, \"Device {}\", device_id),\n"
+        "            FlowEntryMatchMode::Local { process } => match process {\n"
+        "                Some(filter) => write!(f, \"Local({:?}: {:?})\", filter.mode, filter.names),\n"
+        "                None => write!(f, \"Local\"),\n"
+        "            },\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+    )
+    patch(
+        "landscape-database/src/flow_rule/repository.rs",
+        "            FlowEntryMatchMode::Device { device_id } => (\n"
+        "                \"json_extract(json_each.value, '$.mode.t') = 'device' AND json_extract(json_each.value, '$.mode.device_id') = ?\",\n"
+        "                vec![sea_orm::Value::String(Some(Box::new(device_id.to_string())))],\n"
+        "            ),\n"
+        "        };\n",
+        "            FlowEntryMatchMode::Device { device_id } => (\n"
+        "                \"json_extract(json_each.value, '$.mode.t') = 'device' AND json_extract(json_each.value, '$.mode.device_id') = ?\",\n"
+        "                vec![sea_orm::Value::String(Some(Box::new(device_id.to_string())))],\n"
+        "            ),\n"
+        "            FlowEntryMatchMode::Local { process } => (\n"
+        "                \"json_extract(json_each.value, '$.mode.t') = 'local' AND COALESCE(json_extract(json_each.value, '$.mode.process'), 'null') = ?\",\n"
+        "                vec![sea_orm::Value::String(Some(Box::new(\n"
+        "                    serde_json::to_string(process).unwrap_or_else(|_| \"null\".to_string()),\n"
+        "                )))],\n"
+        "            ),\n"
+        "        };\n",
+    )
+    patch(
+        "landscape-database/src/flow_rule/repository.rs",
+        "        FlowEntryMatchMode::Ip { ip, prefix_len } => Some(ResolvedFlowEntryRule {\n"
+        "            qos: rule.qos,\n"
+        "            mode: ResolvedFlowEntryMatchMode::Ip { ip, prefix_len },\n"
+        "        }),\n"
+        "    }\n"
+        "}\n",
+        "        FlowEntryMatchMode::Ip { ip, prefix_len } => Some(ResolvedFlowEntryRule {\n"
+        "            qos: rule.qos,\n"
+        "            mode: ResolvedFlowEntryMatchMode::Ip { ip, prefix_len },\n"
+        "        }),\n"
+        "        // Local/process rules use the dedicated process matcher, not the\n"
+        "        // address-based flow_match_map; they are added there in a later step.\n"
+        "        FlowEntryMatchMode::Local { .. } => {\n"
+        "            tracing::warn!(\n"
+        "                \"local process flow rule configured, but the eBPF process matcher is not wired yet\"\n"
+        "            );\n"
+        "            None\n"
+        "        }\n"
+        "    }\n"
+        "}\n",
+    )
+    patch(
+        "landscape-database/src/flow_rule/repository.rs",
+        "        FlowEntryMatchMode::Device { .. } => None,\n",
+        "        FlowEntryMatchMode::Device { .. } | FlowEntryMatchMode::Local { .. } => None,\n",
+    )
+    patch(
+        "landscape-webui/src/components/flow/FlowEditModal.vue",
+        "    } else if (rule.mode.t === \"ip\") {\n"
+        "      key = `ip:${rule.mode.ip}/${rule.mode.prefix_len}`;\n"
+        "    } else {\n"
+        "      key = `device:${rule.mode.device_id}`;\n"
+        "    }\n",
+        "    } else if (rule.mode.t === \"ip\") {\n"
+        "      key = `ip:${rule.mode.ip}/${rule.mode.prefix_len}`;\n"
+        "    } else if (rule.mode.t === \"device\") {\n"
+        "      key = `device:${rule.mode.device_id}`;\n"
+        "    } else {\n"
+        "      key = `local:${JSON.stringify(rule.mode.process ?? null)}`;\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-webui/src/i18n/zh/flow/index.ts",
+        "  match_rule: {\n"
+        "    add_entry_rule: \"增加一条入口匹配规则\",\n"
+        "    select_device_placeholder: \"选择已登记设备\",\n"
+        "    mac_placeholder: \"手动输入 MAC 地址\",\n"
+        "    ip_placeholder: \"IP 地址\",\n"
+        "    prefix_placeholder: \"前缀长度\",\n"
+        "  },\n",
+        "  match_rule: {\n"
+        "    add_entry_rule: \"增加一条入口匹配规则\",\n"
+        "    mode_device: \"已登记设备\",\n"
+        "    mode_mac: \"MAC 地址\",\n"
+        "    mode_ip: \"IP 地址\",\n"
+        "    mode_local: \"本机程序\",\n"
+        "    local_include: \"正选\",\n"
+        "    local_exclude: \"反选\",\n"
+        "    local_all: \"本机（全部进程）\",\n"
+        "    process_placeholder: \"输入进程名（comm，最长 15 字符）\",\n"
+        "    select_device_placeholder: \"选择已登记设备\",\n"
+        "    mac_placeholder: \"手动输入 MAC 地址\",\n"
+        "    ip_placeholder: \"IP 地址\",\n"
+        "    prefix_placeholder: \"前缀长度\",\n"
+        "  },\n",
+    )
+    patch(
+        "landscape-webui/src/i18n/en/flow/index.ts",
+        "  match_rule: {\n"
+        "    add_entry_rule: \"Add entry match rule\",\n"
+        "    select_device_placeholder: \"Select an enrolled device\",\n"
+        "    mac_placeholder: \"Enter MAC address\",\n"
+        "    ip_placeholder: \"IP address\",\n"
+        "    prefix_placeholder: \"Prefix length\",\n"
+        "  },\n",
+        "  match_rule: {\n"
+        "    add_entry_rule: \"Add entry match rule\",\n"
+        "    mode_device: \"Enrolled device\",\n"
+        "    mode_mac: \"MAC address\",\n"
+        "    mode_ip: \"IP address\",\n"
+        "    mode_local: \"Local process\",\n"
+        "    local_include: \"Include\",\n"
+        "    local_exclude: \"Exclude\",\n"
+        "    local_all: \"Local (all processes)\",\n"
+        "    process_placeholder: \"Process name (comm, up to 15 chars)\",\n"
+        "    select_device_placeholder: \"Select an enrolled device\",\n"
+        "    mac_placeholder: \"Enter MAC address\",\n"
+        "    ip_placeholder: \"IP address\",\n"
+        "    prefix_placeholder: \"Prefix length\",\n"
+        "  },\n",
+    )
+    patch(
+        "landscape-common/src/flow/config.rs",
+        "    #[test]\n"
+        "    fn accepts_ipv6_host_prefix() {\n"
+        "        let result = FlowEntryMatchMode::Ip {\n"
+        '            ip: "2001:db8::1".parse().unwrap(),\n'
+        "            prefix_len: 128,\n"
+        "        }\n"
+        "        .validate();\n"
+        "\n"
+        "        assert!(result.is_ok());\n"
+        "    }\n"
+        "}\n",
+        "    #[test]\n"
+        "    fn accepts_ipv6_host_prefix() {\n"
+        "        let result = FlowEntryMatchMode::Ip {\n"
+        '            ip: "2001:db8::1".parse().unwrap(),\n'
+        "            prefix_len: 128,\n"
+        "        }\n"
+        "        .validate();\n"
+        "\n"
+        "        assert!(result.is_ok());\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n"
+        "    fn local_process_filter_roundtrips_and_validates() {\n"
+        "        let mode = FlowEntryMatchMode::Local {\n"
+        "            process: Some(ProcessFilter {\n"
+        "                mode: ProcessMatchMode::Exclude,\n"
+        '                names: vec!["curl".to_string(), "wget".to_string()],\n'
+        "            }),\n"
+        "        };\n"
+        "\n"
+        "        assert!(mode.validate().is_ok());\n"
+        "        let json = serde_json::to_value(&mode).unwrap();\n"
+        '        assert_eq!(json["t"].as_str(), Some("local"));\n'
+        '        assert_eq!(json["process"]["mode"].as_str(), Some("exclude"));\n'
+        '        assert_eq!(json["process"]["names"][0].as_str(), Some("curl"));\n'
+        "        let decoded: FlowEntryMatchMode = serde_json::from_value(json).unwrap();\n"
+        "        assert_eq!(decoded, mode);\n"
+        "    }\n"
+        "\n"
+        "    #[test]\n"
+        "    fn rejects_empty_and_oversized_local_process_names() {\n"
+        "        let empty = FlowEntryMatchMode::Local {\n"
+        "            process: Some(ProcessFilter {\n"
+        "                mode: ProcessMatchMode::Include,\n"
+        '                names: vec!["  ".to_string()],\n'
+        "            }),\n"
+        "        };\n"
+        "        assert!(empty.validate().is_err());\n"
+        "\n"
+        "        let oversized = FlowEntryMatchMode::Local {\n"
+        "            process: Some(ProcessFilter {\n"
+        "                mode: ProcessMatchMode::Include,\n"
+        '                names: vec!["a".repeat(16)],\n'
+        "            }),\n"
+        "        };\n"
+        "        assert!(oversized.validate().is_err());\n"
+        "    }\n"
+        "}\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
