@@ -100,7 +100,11 @@ function local_filter(value: any): {
   if (value.mode.t !== "local") {
     return { mode: "include", names: [] };
   }
-  return (value.mode as any).process ?? { mode: "include", names: [] };
+  const process = (value.mode as any).process;
+  return {
+    mode: process?.mode ?? "include",
+    names: process?.names ?? [],
+  };
 }
 
 function set_process_mode(value: any, mode: string) {

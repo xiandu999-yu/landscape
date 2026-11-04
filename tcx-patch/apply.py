@@ -2405,7 +2405,7 @@ def main() -> None:
         "    } else if (rule.mode.t === \"device\") {\n"
         "      key = `device:${rule.mode.device_id}`;\n"
         "    } else {\n"
-        "      key = `local:${JSON.stringify(rule.mode.process ?? null)}`;\n"
+        "      key = `local:${JSON.stringify((rule.mode as any).process ?? null)}`;\n"
         "    }\n",
     )
     patch(

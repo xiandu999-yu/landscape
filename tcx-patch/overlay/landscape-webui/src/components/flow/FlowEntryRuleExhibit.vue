@@ -41,8 +41,8 @@ const label = computed(() => {
         props.rule.mode.mac_addr,
       );
     case "local": {
-      const filter = props.rule.mode.process;
-      if (!filter || filter.names.length === 0) {
+      const filter = (props.rule.mode as any).process;
+      if (!filter || !filter.names || filter.names.length === 0) {
         return t("flow.match_rule.local_all");
       }
       const prefix =

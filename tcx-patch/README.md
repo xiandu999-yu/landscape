@@ -588,6 +588,8 @@ WebUI 同步：
 - 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型
   `flow_match_map`，WebServer 加载到该规则时会打 warning；eBPF
   cgroup/进程识别和虚拟网卡出口在后续补丁接入。
+- 注意：`ProcessFilter.names` 在 OpenAPI 中是可选字段，前端展示时必须
+  判空（已在 `FlowEntryRuleExhibit.vue` 处理）。
 
 ## 已知限制 / 下一步
 
