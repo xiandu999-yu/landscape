@@ -598,16 +598,18 @@ WebUI 同步：
 ### SOCKS5 单例虚拟设备
 
 - 配置类型 `Socks5VirtualConfig { software, server, port, username, password, kind }`；
-  `software` 同时是宿主侧设备名，peer 为 `<software>-p`，netns 为
-  `landscape-<software>`。
+  `software` 是宿主侧设备名（UI 显示为「设备名」），默认 `landscape`；peer 为
+  `<software>-p`，netns 为 `landscape-<software>`。
+- 设备类型 `kind`：`auto`（netkit 优先，失败回退 veth）、`veth`、`netkit`、
+  `netkit_l3`（`ip link add ... type netkit mode l3 ...`）。
 - API：`GET/POST/DELETE /interfaces/socks5-virtual`；服务层用互斥 + 持久化
   `socks5-virtual.json` 保证只能存在 1 个，第二次 `POST` 返回冲突。
-- 创建时同步执行：建 netns → 建 netkit（Auto 失败回退 veth）→ peer 移入
-  netns → 两端 up → 配 `10.255.0.1/24` / `10.255.0.2/24` + netns 默认路由 →
-  写入 `NetworkIfaceConfig`（zone=`Virtual`）→ 最后落配置文件；任一步失败回滚。
+- 创建时同步执行：建 netns → 建设备（Netkit L3 用 `mode l3`；Auto 失败回退
+  veth）→ peer 移入 netns → 两端 up → 配 `10.255.0.1/24` / `10.255.0.2/24`
+  + netns 默认路由 → 写入 `NetworkIfaceConfig`（zone=`Virtual`）→ 最后落配置
+  文件；任一步失败回滚。
 - 删除时清理 netns、宿主 link、`NetworkIfaceConfig` 和配置文件。
-- 设备名必须使用软件名（`mihomo`/`sing-box`/`daed` 等），不使用无辨识度的
-  `socks5`。
+- 设备名不能是 `socks5`，避免无辨识度；默认用 `landscape`。
 - 当前尚未启动 SOCKS5 用户态转发器；设备建好后由后续转发器接入。
 
 ## 已知限制 / 下一步

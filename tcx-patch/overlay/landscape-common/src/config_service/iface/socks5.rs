@@ -10,6 +10,8 @@ pub enum Socks5LinkKind {
     Auto,
     Veth,
     Netkit,
+    /// netkit in L3 mode (`ip link add ... type netkit mode l3`).
+    NetkitL3,
 }
 
 /// Singleton SOCKS5 virtual-device configuration.

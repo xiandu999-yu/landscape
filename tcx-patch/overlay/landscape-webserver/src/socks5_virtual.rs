@@ -143,17 +143,35 @@ fn create_link(config: &Socks5VirtualConfig) -> Result<(), String> {
 
     ip(&["netns", "add", netns.as_str()])?;
 
-    let mut kind = match config.kind {
-        Socks5LinkKind::Veth => "veth",
-        Socks5LinkKind::Netkit => "netkit",
-        Socks5LinkKind::Auto => "netkit",
+    let result = match config.kind {
+        Socks5LinkKind::Veth => {
+            ip(&["link", "add", host, "type", "veth", "peer", "name", peer.as_str()])
+        }
+        Socks5LinkKind::Netkit => {
+            ip(&["link", "add", host, "type", "netkit", "peer", "name", peer.as_str()])
+        }
+        Socks5LinkKind::NetkitL3 => ip(&[
+            "link",
+            "add",
+            host,
+            "type",
+            "netkit",
+            "mode",
+            "l3",
+            "peer",
+            "name",
+            peer.as_str(),
+        ]),
+        Socks5LinkKind::Auto => {
+            let netkit =
+                ip(&["link", "add", host, "type", "netkit", "peer", "name", peer.as_str()]);
+            if netkit.is_err() {
+                ip(&["link", "add", host, "type", "veth", "peer", "name", peer.as_str()])
+            } else {
+                netkit
+            }
+        }
     };
-
-    let mut result = ip(&["link", "add", host, "type", kind, "peer", "name", &peer]);
-    if result.is_err() && matches!(config.kind, Socks5LinkKind::Auto) {
-        kind = "veth";
-        result = ip(&["link", "add", host, "type", kind, "peer", "name", &peer]);
-    }
     result?;
 
     ip(&["link", "set", peer.as_str(), "netns", netns.as_str()])?;
@@ -168,7 +186,7 @@ fn create_link(config: &Socks5VirtualConfig) -> Result<(), String> {
         software = host,
         peer = %peer,
         netns = %netns,
-        kind = %kind,
+        kind = ?config.kind,
         "created SOCKS5 virtual device"
     );
     Ok(())

@@ -19,7 +19,7 @@ const bridge_name = ref("");
 const socks5 = ref<Socks5VirtualConfig | null>(null);
 const socks5_loading = ref(false);
 const socks5_form = ref({
-  software: "mihomo",
+  software: "landscape",
   server: "",
   port: 1080 as number | null,
   username: "",
@@ -31,9 +31,11 @@ const kind_options = computed(() => [
   { label: t("interface.socks5_kind_auto"), value: "auto" },
   { label: t("interface.socks5_kind_veth"), value: "veth" },
   { label: t("interface.socks5_kind_netkit"), value: "netkit" },
+  { label: t("interface.socks5_kind_netkit_l3"), value: "netkit_l3" },
 ]);
 
 const software_options = [
+  { label: "landscape", value: "landscape" },
   { label: "mihomo", value: "mihomo" },
   { label: "sing-box", value: "sing-box" },
   { label: "daed", value: "daed" },
@@ -132,7 +134,7 @@ async function add_bridge() {
         </n-flex>
       </n-alert>
 
-      <n-form v-else label-placement="left" label-width="92" :show-feedback="false">
+      <n-form v-else label-placement="left" label-width="108" :show-feedback="false">
         <n-grid :cols="2" :x-gap="12">
           <n-form-item-gi :label="t('interface.socks5_software')">
             <n-select
@@ -140,7 +142,7 @@ async function add_bridge() {
               :options="software_options"
               filterable
               tag
-              placeholder="mihomo / sing-box / daed"
+              placeholder="landscape / mihomo / sing-box"
             />
           </n-form-item-gi>
           <n-form-item-gi :label="t('interface.socks5_kind')">
