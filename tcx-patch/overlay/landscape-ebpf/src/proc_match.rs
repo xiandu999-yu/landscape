@@ -35,7 +35,7 @@ impl ProcMatch {
     pub fn new() -> LdEbpfResult<Self> {
         let builder = ProcMatchSkelBuilder::default();
         let (backing, obj) = OwnedOpenObject::new();
-        let mut open_skel =
+        let open_skel =
             crate::bpf_ctx!(builder.open(obj), "open proc_match skeleton")?;
         let skel: ProcMatchSkel<'static> =
             crate::bpf_ctx!(open_skel.load(), "load proc_match skeleton")?;

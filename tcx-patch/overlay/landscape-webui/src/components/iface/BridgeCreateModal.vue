@@ -45,7 +45,8 @@ async function load_socks5() {
 }
 
 async function add_socks5() {
-  if (!socks5_form.value.software.trim()) {
+  const software = (socks5_form.value.software ?? "").trim();
+  if (!software) {
     window.$message?.warning(t("interface.socks5_software_required"));
     return;
   }
@@ -56,7 +57,7 @@ async function add_socks5() {
   socks5_loading.value = true;
   try {
     const config = await create_socks5_virtual({
-      software: socks5_form.value.software.trim(),
+      software,
       server: socks5_form.value.server.trim(),
       port: socks5_form.value.port ?? 0,
       username: socks5_form.value.username.trim() || null,

@@ -70,6 +70,7 @@ def apply_socks5_virtual_patch(patch):
         "use crate::{LandscapeApp, api::LandscapeApiResp, error::LandscapeApiResult};\n",
         "use crate::api::JsonBody;\n"
         "use crate::socks5_virtual::{\n"
+        "    __path_create_socks5_virtual, __path_delete_socks5_virtual, __path_get_socks5_virtual,\n"
         "    create_socks5_virtual, delete_socks5_virtual, get_socks5_virtual,\n"
         "};\n"
         "use crate::{LandscapeApp, api::LandscapeApiResp, error::LandscapeApiResult};\n",
