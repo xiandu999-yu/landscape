@@ -578,11 +578,11 @@ WebUI 同步：
 
 ### 本机程序分流（配置/UI 第一版，数据面待接）
 
-- `FlowEntryMatchMode` 新增 `Local { inverse, bypass_process }`，JSON 形状为
-  `{"t":"local","inverse":false,"bypass_process":["mihomo",...]}`；按 Linux
+- `FlowEntryMatchMode` 新增 `Local { blacklist, bypass_process }`，JSON 形状为
+  `{"t":"local","blacklist":false,"bypass_process":["mihomo",...]}`；按 Linux
   `comm` 匹配（最长 15 字节）。
-- `inverse=false` 是正选（只匹配名单内进程），`inverse=true` 是反选
-  （排除名单内进程）。正反选只处理名单，不参与 flow 选择、`flow_id` 或优先级。
+- `blacklist=false` 是白名单（只匹配名单内进程），`blacklist=true` 是黑名单
+  （排除名单内进程）。黑白名单只处理名单，不参与 flow 选择、`flow_id` 或优先级。
 - 前端「分流入口匹配规则」新增「本机程序」类型，进程名用 tag 输入；入口
   展示为「正选/反选: 进程列表」。
 - 当前 `resolve_flow_entry_rule` 不把 `Local` 规则写入地址型

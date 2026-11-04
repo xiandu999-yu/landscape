@@ -46,9 +46,9 @@ const label = computed(() => {
       if (names.length === 0) {
         return t("flow.match_rule.local_all");
       }
-      const prefix = mode.inverse
-        ? t("flow.match_rule.local_exclude")
-        : t("flow.match_rule.local_include");
+      const prefix = mode.blacklist
+        ? t("flow.match_rule.local_blacklist")
+        : t("flow.match_rule.local_whitelist");
       return `${prefix}: ${names.join(", ")}`;
     }
     default:

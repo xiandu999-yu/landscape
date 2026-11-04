@@ -2,10 +2,10 @@
 
 The public shape is:
 
-    {"t": "local", "inverse": false, "bypass_process": ["mihomo", ...]}
+    {"t": "local", "blacklist": false, "bypass_process": ["mihomo", ...]}
 
-`inverse = false` means positive selection (only the listed processes match);
-`inverse = true` means negative selection (the listed processes are excluded).
+`blacklist = false` means whitelist (only the listed processes match);
+`blacklist = true` means blacklist (the listed processes are excluded).
 Both fields live directly on the `Local` variant so the JSON matches the
 DNS rule style rather than nesting under `process`.
 """
@@ -19,11 +19,11 @@ def apply_local_proc_patch(patch):
         "    Device {\n        device_id: Uuid,\n    },\n"
         "    /// Locally generated traffic (the router's own sockets).\n"
         "    ///\n"
-        "    /// `bypass_process` is the process list; `inverse` selects whether the\n"
-        "    /// list is a whitelist (false) or a blacklist (true).\n"
+        "    /// `bypass_process` is the process list; `blacklist` selects whether\n"
+        "    /// the list is a whitelist (false) or a blacklist (true).\n"
         "    Local {\n"
         "        #[serde(default)]\n"
-        "        inverse: bool,\n"
+        "        blacklist: bool,\n"
         "        #[serde(default)]\n"
         "        bypass_process: Vec<String>,\n"
         "    },\n"
@@ -70,10 +70,10 @@ def apply_local_proc_patch(patch):
         "    }\n"
         "}\n",
         "            FlowEntryMatchMode::Device { device_id } => write!(f, \"Device {}\", device_id),\n"
-        "            FlowEntryMatchMode::Local { inverse, bypass_process } => write!(\n"
+        "            FlowEntryMatchMode::Local { blacklist, bypass_process } => write!(\n"
         "                f,\n"
         "                \"Local({}: {:?})\",\n"
-        "                if *inverse { \"inverse\" } else { \"direct\" },\n"
+        "                if *blacklist { \"blacklist\" } else { \"whitelist\" },\n"
         "                bypass_process\n"
         "            ),\n"
         "        }\n"
@@ -109,14 +109,14 @@ def apply_local_proc_patch(patch):
         "    #[test]\n"
         "    fn local_process_filter_roundtrips_and_validates() {\n"
         "        let mode = FlowEntryMatchMode::Local {\n"
-        "            inverse: true,\n"
+        "            blacklist: true,\n"
         '            bypass_process: vec!["curl".to_string(), "wget".to_string()],\n'
         "        };\n"
         "\n"
         "        assert!(mode.validate().is_ok());\n"
         "        let json = serde_json::to_value(&mode).unwrap();\n"
         '        assert_eq!(json["t"].as_str(), Some("local"));\n'
-        '        assert_eq!(json["inverse"].as_bool(), Some(true));\n'
+        '        assert_eq!(json["blacklist"].as_bool(), Some(true));\n'
         '        assert_eq!(json["bypass_process"][0].as_str(), Some("curl"));\n'
         "        let decoded: FlowEntryMatchMode = serde_json::from_value(json).unwrap();\n"
         "        assert_eq!(decoded, mode);\n"
@@ -125,13 +125,13 @@ def apply_local_proc_patch(patch):
         "    #[test]\n"
         "    fn rejects_empty_and_oversized_local_process_names() {\n"
         "        let empty = FlowEntryMatchMode::Local {\n"
-        "            inverse: false,\n"
+        "            blacklist: false,\n"
         '            bypass_process: vec!["  ".to_string()],\n'
         "        };\n"
         "        assert!(empty.validate().is_err());\n"
         "\n"
         "        let oversized = FlowEntryMatchMode::Local {\n"
-        "            inverse: false,\n"
+        "            blacklist: false,\n"
         '            bypass_process: vec!["a".repeat(16)],\n'
         "        };\n"
         "        assert!(oversized.validate().is_err());\n"
@@ -151,10 +151,10 @@ def apply_local_proc_patch(patch):
         "                \"json_extract(json_each.value, '$.mode.t') = 'device' AND json_extract(json_each.value, '$.mode.device_id') = ?\",\n"
         "                vec![sea_orm::Value::String(Some(Box::new(device_id.to_string())))],\n"
         "            ),\n"
-        "            FlowEntryMatchMode::Local { inverse, bypass_process } => (\n"
-        "                \"json_extract(json_each.value, '$.mode.t') = 'local' AND json_extract(json_each.value, '$.mode.inverse') = ? AND COALESCE(json_extract(json_each.value, '$.mode.bypass_process'), '[]') = ?\",\n"
+        "            FlowEntryMatchMode::Local { blacklist, bypass_process } => (\n"
+        "                \"json_extract(json_each.value, '$.mode.t') = 'local' AND json_extract(json_each.value, '$.mode.blacklist') = ? AND COALESCE(json_extract(json_each.value, '$.mode.bypass_process'), '[]') = ?\",\n"
         "                vec![\n"
-        "                    sea_orm::Value::Int(Some(if *inverse { 1 } else { 0 })),\n"
+        "                    sea_orm::Value::Int(Some(if *blacklist { 1 } else { 0 })),\n"
         "                    sea_orm::Value::String(Some(Box::new(\n"
         "                        serde_json::to_string(bypass_process)\n"
         '                            .unwrap_or_else(|_| "[]".to_string()),\n'
@@ -208,7 +208,7 @@ def apply_local_proc_patch(patch):
         "      key = `device:${rule.mode.device_id}`;\n"
         "    } else {\n"
         "      key = `local:${JSON.stringify({\n"
-        "        inverse: (rule.mode as any).inverse ?? false,\n"
+        "        blacklist: (rule.mode as any).blacklist ?? false,\n"
         "        bypass_process: (rule.mode as any).bypass_process ?? [],\n"
         "      })}`;\n"
         "    }\n",
@@ -230,10 +230,10 @@ def apply_local_proc_patch(patch):
         "    mode_mac: \"MAC 地址\",\n"
         "    mode_ip: \"IP 地址\",\n"
         "    mode_local: \"本机程序\",\n"
-        "    local_include: \"正选\",\n"
-        "    local_exclude: \"反选\",\n"
+        "    local_whitelist: \"白名单\",\n"
+        "    local_blacklist: \"黑名单\",\n"
         "    local_all: \"本机（全部进程）\",\n"
-        "    local_hint: \"正选=只匹配名单内进程；反选=排除名单内进程\",\n"
+        "    local_hint: \"白名单=只匹配名单内进程；黑名单=排除名单内进程\",\n"
         "    process_placeholder: \"进程名（comm，最长 15 字符）\",\n"
         "    add_process: \"添加进程\",\n"
         "    select_device_placeholder: \"选择已登记设备\",\n"
@@ -257,10 +257,10 @@ def apply_local_proc_patch(patch):
         "    mode_mac: \"MAC address\",\n"
         "    mode_ip: \"IP address\",\n"
         "    mode_local: \"Local process\",\n"
-        "    local_include: \"Include\",\n"
-        "    local_exclude: \"Exclude\",\n"
+        "    local_whitelist: \"Whitelist\",\n"
+        "    local_blacklist: \"Blacklist\",\n"
         "    local_all: \"Local (all processes)\",\n"
-        "    local_hint: \"Include = listed processes only; Exclude = everything except listed\",\n"
+        "    local_hint: \"Whitelist = listed processes only; blacklist = everything except listed\",\n"
         "    process_placeholder: \"Process name (comm, up to 15 chars)\",\n"
         "    add_process: \"Add process\",\n"
         "    select_device_placeholder: \"Select an enrolled device\",\n"
