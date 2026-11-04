@@ -8,11 +8,11 @@
 use std::{
     io::{self, ErrorKind},
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    os::fd::AsRawFd,
+    os::fd::{AsRawFd, FromRawFd},
 };
 
 use landscape_common::config_service::iface::Socks5VirtualConfig;
-use socket2::{Domain, Protocol, Socket, Type};
+use landscape_ebpf::libc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional},
     net::{TcpListener, TcpStream},
@@ -22,28 +22,68 @@ use tokio::{
 const SO_ORIGINAL_DST: libc::c_int = 80;
 const IP_TRANSPARENT: libc::c_int = 19;
 
-pub fn bind_transparent(port: u16) -> io::Result<TcpListener> {
-    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
-    socket.set_reuse_address(true)?;
-    socket.set_nonblocking(true)?;
-
+fn set_bool_sockopt(fd: libc::c_int, level: libc::c_int, name: libc::c_int) -> io::Result<()> {
     let enable: libc::c_int = 1;
     let result = unsafe {
         libc::setsockopt(
-            socket.as_raw_fd(),
-            libc::SOL_IP,
-            IP_TRANSPARENT,
+            fd,
+            level,
+            name,
             &enable as *const _ as *const libc::c_void,
             std::mem::size_of::<libc::c_int>() as libc::socklen_t,
         )
     };
     if result != 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub fn bind_transparent(port: u16) -> io::Result<TcpListener> {
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_INET,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
         return Err(io::Error::last_os_error());
     }
 
-    socket.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())?;
-    socket.listen(1024)?;
-    let listener: std::net::TcpListener = socket.into();
+    let configured = (|| -> io::Result<()> {
+        set_bool_sockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)?;
+        set_bool_sockopt(fd, libc::SOL_IP, IP_TRANSPARENT)?;
+
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr { s_addr: libc::INADDR_ANY },
+            sin_zero: [0; 8],
+        };
+        let bound = unsafe {
+            libc::bind(
+                fd,
+                &addr as *const _ as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if bound != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { libc::listen(fd, 1024) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    })();
+
+    if let Err(error) = configured {
+        unsafe { libc::close(fd) };
+        return Err(error);
+    }
+
+    let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
     TcpListener::from_std(listener)
 }
 

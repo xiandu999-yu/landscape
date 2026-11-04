@@ -19,10 +19,10 @@ use std::{
 
 use landscape_ebpf::{
     landscape::TcHookProxy,
+    libc,
     skel::socks5_tproxy::Socks5TproxySkelBuilder,
+    OpenSkel, SkelBuilder, TC_INGRESS,
 };
-use libbpf_rs::TC_INGRESS;
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use tokio::{
     net::TcpListener,
     sync::{Mutex, oneshot},

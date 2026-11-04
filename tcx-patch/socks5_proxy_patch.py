@@ -25,14 +25,16 @@ def apply_socks5_proxy_patch(patch):
         "pub mod tproxy;\n",
     )
 
-    # 3) `libc` for SO_ORIGINAL_DST / IP_TRANSPARENT.
+    # 3) Re-export the libbpf/libc bits used by the webserver so it needs no
+    # new direct dependencies (which would change Cargo.lock).
     patch(
-        "landscape-webserver/Cargo.toml",
-        "tokio = { workspace = true, features = [\"full\"] }\n"
-        "clap = { workspace = true }\n",
-        "tokio = { workspace = true, features = [\"full\"] }\n"
-        "clap = { workspace = true }\n"
-        "libc = { workspace = true }\n"
-        "socket2 = { workspace = true }\n"
-        "libbpf-rs = { workspace = true }\n",
+        "landscape-ebpf/src/lib.rs",
+        "const LANDSCAPE_IPV4_TYPE: u8 = 0;\n",
+        "pub use libbpf_rs::{\n"
+        "    skel::{OpenSkel, SkelBuilder},\n"
+        "    TC_INGRESS,\n"
+        "};\n"
+        "pub use libc;\n"
+        "\n"
+        "const LANDSCAPE_IPV4_TYPE: u8 = 0;\n",
     )
