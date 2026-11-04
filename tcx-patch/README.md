@@ -564,6 +564,18 @@ WAN→LAN 方向，和出向对称：
 - 邻居增/删/改时 `bump_flow_generation()` 自增 `nat_wan_ctl[0]`，所有条目立即失效；
 - 寿命改为 TCP 120s / QUIC 60s / UDP 60s（只作安全网）；5 秒扫描降为 60 秒兜底。
 
+## 虚拟网卡区域（`IfaceZoneType::Virtual`，2026-11-04）
+
+`IfaceZoneType` 新增 `Virtual`，用于用户自建、由 OpenWrt 之外管理的
+tunnel/veth/netkit 等设备。网络配置生成器不会为它写 `/etc/config/network`、
+不创建 bridge、不启动 DHCP，只保留网卡本身和已有配置。
+
+WebUI 同步：
+
+- 「切换网卡区域」弹窗新增「虚拟网卡」单选项，文案 key 为 `interface.zone_virtual`；
+- 分流出口的目标类型里，原「Docker」分组标题改为「虚拟网卡」；`target.t === "netns"`
+  的容器判定、容器名列表和 `container_name` 字段都保持不变。
+
 ## 已知限制 / 下一步
 
 - TCX 顺序的保存不会实时重排已挂载的 link，需要重启对应路由服务/进程。

@@ -2206,6 +2206,38 @@ def main() -> None:
         "    /// User-created tunnel/veth/netkit device (managed outside OpenWrt).\n"
         "    Virtual,\n}\n",
     )
+    # 24) Virtual NIC zone in the WebUI: expose it in the zone switcher and
+    #     rename the egress "Docker" group heading. Container detection
+    #     (`netns` target + container_name) is intentionally left untouched.
+    patch(
+        "landscape-webui/src/i18n/zh/interface/index.ts",
+        '  zone_undefined: "未定义",\n',
+        '  zone_undefined: "未定义",\n  zone_virtual: "虚拟网卡",\n',
+    )
+    patch(
+        "landscape-webui/src/i18n/en/interface/index.ts",
+        '  zone_undefined: "Undefined",\n',
+        '  zone_undefined: "Undefined",\n  zone_virtual: "Virtual NIC",\n',
+    )
+    patch(
+        "landscape-webui/src/components/iface/IfaceChangeZone.vue",
+        '              <n-radio-button :value="IfaceZoneType.lan" label="LAN" />\n',
+        '              <n-radio-button :value="IfaceZoneType.lan" label="LAN" />\n'
+        "              <n-radio-button\n"
+        '                :value="IfaceZoneType.virtual"\n'
+        "                :label=\"t('interface.zone_virtual')\"\n"
+        "              />\n",
+    )
+    patch(
+        "landscape-webui/src/i18n/zh/flow/index.ts",
+        '    type_docker: "Docker",\n',
+        '    type_docker: "虚拟网卡",\n',
+    )
+    patch(
+        "landscape-webui/src/i18n/en/flow/index.ts",
+        '    type_docker: "Docker",\n',
+        '    type_docker: "Virtual NIC",\n',
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
