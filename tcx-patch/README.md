@@ -608,7 +608,10 @@ WebUI 同步：
   veth）→ peer 移入 netns → 两端 up → 配 `10.255.0.1/24` / `10.255.0.2/24`
   + netns 默认路由 → 写入 `NetworkIfaceConfig`（zone=`Virtual`）→ 最后落配置
   文件；任一步失败回滚。
-- 删除时清理 netns、宿主 link、`NetworkIfaceConfig` 和配置文件。
+- 删除时清理 netns、宿主 link、`NetworkIfaceConfig`、WAN route target 和配置文件。
+- 设备创建时按宿主 link 的 ifindex/MAC 注册 IPv4 `RouteOwner::Netns(<device>)`
+  route target；`FlowTarget::Virtual { name }` 映射到同一 owner，分流出口新增
+  「SOCKS5 虚拟网卡」类型。当前只注册 IPv4。
 - 设备名不能是 `socks5`，避免无辨识度；默认用 `landscape`。
 - 当前尚未启动 SOCKS5 用户态转发器；设备建好后由后续转发器接入。
 

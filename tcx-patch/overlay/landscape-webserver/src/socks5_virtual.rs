@@ -5,6 +5,7 @@
 //! or OpenWrt configuration is touched.
 
 use std::{
+    net::Ipv4Addr,
     path::PathBuf,
     process::Command,
     sync::Arc,
@@ -14,12 +15,14 @@ use axum::extract::State;
 use landscape::{
     config_service::iface_service::IfaceManagerService,
     get_iface_by_name,
+    sys_service::route::IpRouteService,
 };
 use landscape_common::{
     config_service::iface::{IfaceZoneType, Socks5LinkKind, Socks5VirtualConfig},
     database::error::DbError,
     dev::iface::ChangeZone,
     service::controller::ConfigStoreController,
+    sys_service::route_service::{RouteOwner, RouteTargetInfo, WanRouteTarget},
 };
 use tokio::sync::Mutex;
 
@@ -70,6 +73,7 @@ impl Socks5VirtualService {
         &self,
         config: Socks5VirtualConfig,
         iface: &IfaceManagerService,
+        route: &IpRouteService,
     ) -> Result<Socks5VirtualConfig, DbError> {
         config.validate().map_err(DbError::Internal)?;
 
@@ -101,16 +105,44 @@ impl Socks5VirtualService {
             return Err(DbError::Internal(error));
         }
 
+        // Register the virtual device as a WAN route target.  The flow target
+        // `virtual` maps to this same `RouteOwner::Netns(name)` key.
+        if let Some(iface_info) = get_iface_by_name(&host).await {
+            let target = RouteTargetInfo::new_gateway_v4(
+                iface_info.index,
+                &host,
+                iface_info.mac.clone(),
+                Ipv4Addr::new(10, 255, 0, 1),
+                Ipv4Addr::new(10, 255, 0, 2),
+                false,
+            );
+            route
+                .insert_ipv4_wan_route(
+                    &RouteOwner::Netns(host.clone()),
+                    WanRouteTarget::netns(target),
+                )
+                .await;
+        } else {
+            tracing::warn!(device = host, "SOCKS5 virtual device is not visible in netlink; route target not registered");
+        }
+
         *guard = Some(config.clone());
         Ok(config)
     }
 
-    pub async fn delete(&self, iface: &IfaceManagerService) -> Result<(), DbError> {
+    pub async fn delete(
+        &self,
+        iface: &IfaceManagerService,
+        route: &IpRouteService,
+    ) -> Result<(), DbError> {
         let mut guard = self.inner.lock().await;
         let Some(config) = guard.take() else {
             return Ok(());
         };
 
+        route
+            .remove_ipv4_wan_route(&RouteOwner::Netns(config.host_name().to_string()))
+            .await;
         cleanup_link(&config);
         let _ = iface.delete(config.host_name().to_string()).await;
         let _ = std::fs::remove_file(self.config_path());
@@ -239,7 +271,7 @@ pub(crate) async fn create_socks5_virtual(
 ) -> LandscapeApiResult<Socks5VirtualConfig> {
     let config = state
         .socks5_virtual_service
-        .create(config, &state.iface_config_service)
+        .create(config, &state.iface_config_service, &state.route_service)
         .await?;
     LandscapeApiResp::success(config)
 }
@@ -256,7 +288,7 @@ pub(crate) async fn delete_socks5_virtual(
 ) -> LandscapeApiResult<()> {
     state
         .socks5_virtual_service
-        .delete(&state.iface_config_service)
+        .delete(&state.iface_config_service, &state.route_service)
         .await?;
     LandscapeApiResp::success(())
 }

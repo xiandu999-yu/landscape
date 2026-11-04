@@ -2254,13 +2254,17 @@ def main() -> None:
         fail(f"missing {HERE / 'local_proc_dataplane_patch.py'}")
     if not (HERE / "socks5_virtual_patch.py").is_file():
         fail(f"missing {HERE / 'socks5_virtual_patch.py'}")
+    if not (HERE / "flow_virtual_target_patch.py").is_file():
+        fail(f"missing {HERE / 'flow_virtual_target_patch.py'}")
     from local_proc_patch import apply_local_proc_patch
     from local_proc_dataplane_patch import apply_local_proc_dataplane_patch
     from socks5_virtual_patch import apply_socks5_virtual_patch
+    from flow_virtual_target_patch import apply_flow_virtual_target_patch
 
     apply_local_proc_patch(patch)
     apply_local_proc_dataplane_patch(patch)
     apply_socks5_virtual_patch(patch)
+    apply_flow_virtual_target_patch(patch)
     print(f"TCX overlay applied (overlay={OVERLAY})")
     return
 
