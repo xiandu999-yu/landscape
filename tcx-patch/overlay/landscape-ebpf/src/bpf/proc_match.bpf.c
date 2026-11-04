@@ -56,29 +56,61 @@ int proc_match_egress(struct __sk_buff *skb) {
         return 1;
     }
 
-#pragma unroll
-    for (__u32 i = 0; i < PROC_LOCAL_FLOW_MAX; i++) {
-        __u32 *flow = bpf_map_lookup_elem(&proc_local_flows, &i);
-        if (!flow || *flow == 0) {
-            break;
-        }
+    /* Fully unrolled on purpose: the verifier rejected the compiler's loop
+     * shape (it jumped back to the condition without incrementing `i`).  A
+     * macro expansion is straight-line code, so there is no back edge. */
+#define PROC_MATCH_STEP(I)                                                         \
+    do {                                                                           \
+        __u32 index = (I);                                                         \
+        __u32 *flow = bpf_map_lookup_elem(&proc_local_flows, &index);              \
+        if (flow && *flow != 0) {                                                  \
+            __u32 flow_id = *flow;                                                 \
+            __u8 *flag = bpf_map_lookup_elem(&proc_local_meta, &flow_id);          \
+            if (flag && *flag != 0) {                                              \
+                struct proc_match_key key = {0};                                   \
+                key.flow_id = flow_id;                                             \
+                __builtin_memcpy(key.comm, comm, sizeof(key.comm));                \
+                bool listed = bpf_map_lookup_elem(&proc_match_map, &key) != NULL; \
+                if ((*flag == 1 && listed) || (*flag == 2 && !listed)) {          \
+                    skb_set_mark(skb, (FLOW_REDIRECT << 8) | (flow_id & FLOW_ID_MASK)); \
+                    return 1;                                                      \
+                }                                                                  \
+            }                                                                      \
+        }                                                                          \
+    } while (0)
 
-        __u32 flow_id = *flow;
-        __u8 *flag = bpf_map_lookup_elem(&proc_local_meta, &flow_id);
-        if (!flag || *flag == 0) {
-            continue;
-        }
-
-        struct proc_match_key key = {0};
-        key.flow_id = flow_id;
-        __builtin_memcpy(key.comm, comm, sizeof(key.comm));
-
-        bool listed = bpf_map_lookup_elem(&proc_match_map, &key) != NULL;
-        if ((*flag == 1 && listed) || (*flag == 2 && !listed)) {
-            skb_set_mark(skb, (FLOW_REDIRECT << 8) | (flow_id & FLOW_ID_MASK));
-            return 1;
-        }
-    }
+    PROC_MATCH_STEP(0);
+    PROC_MATCH_STEP(1);
+    PROC_MATCH_STEP(2);
+    PROC_MATCH_STEP(3);
+    PROC_MATCH_STEP(4);
+    PROC_MATCH_STEP(5);
+    PROC_MATCH_STEP(6);
+    PROC_MATCH_STEP(7);
+    PROC_MATCH_STEP(8);
+    PROC_MATCH_STEP(9);
+    PROC_MATCH_STEP(10);
+    PROC_MATCH_STEP(11);
+    PROC_MATCH_STEP(12);
+    PROC_MATCH_STEP(13);
+    PROC_MATCH_STEP(14);
+    PROC_MATCH_STEP(15);
+    PROC_MATCH_STEP(16);
+    PROC_MATCH_STEP(17);
+    PROC_MATCH_STEP(18);
+    PROC_MATCH_STEP(19);
+    PROC_MATCH_STEP(20);
+    PROC_MATCH_STEP(21);
+    PROC_MATCH_STEP(22);
+    PROC_MATCH_STEP(23);
+    PROC_MATCH_STEP(24);
+    PROC_MATCH_STEP(25);
+    PROC_MATCH_STEP(26);
+    PROC_MATCH_STEP(27);
+    PROC_MATCH_STEP(28);
+    PROC_MATCH_STEP(29);
+    PROC_MATCH_STEP(30);
+    PROC_MATCH_STEP(31);
 
     return 1;
 }

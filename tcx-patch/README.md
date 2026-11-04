@@ -587,7 +587,8 @@ WebUI 同步：
   入口按 `白名单/黑名单: 进程列表` 展示。
 - 数据面：`proc_match.bpf.c` 的 `cgroup_skb/egress` 程序在 tc 之前按 `comm`
   查表，把命中的 flow_id 写进 `skb->mark`（`FLOW_REDIRECT` 布局），后续 WAN
-  route 继续用原有 target slot。本地 flow 按 `flow_id` 升序匹配，最多 32 条。
+  route 继续用原有 target slot。本地 flow 按 `flow_id` 升序匹配，最多 32 条；
+  这 32 步用宏完全展开，避免 clang 生成被 verifier 拒绝的回边。
 - 需要 cgroup v2（`/sys/fs/cgroup`）和 `CONFIG_CGROUP_BPF`；attach 失败时
   matcher 会被禁用并打 warning，其余数据面照常工作。
 - `resolve_flow_entry_rule` 不会把 `Local` 规则写进地址型 `flow_match_map`；

@@ -108,10 +108,13 @@ impl Socks5VirtualService {
         // Register the virtual device as a WAN route target.  The flow target
         // `virtual` maps to this same `RouteOwner::Netns(name)` key.
         if let Some(iface_info) = get_iface_by_name(&host).await {
+            // Netkit L3 has no Ethernet MAC; netlink reports all-zero.  Treat
+            // that as "no MAC" so the eBPF target uses the dev-only redirect.
+            let mac = iface_info.mac.filter(|mac| !mac.is_zero());
             let target = RouteTargetInfo::new_gateway_v4(
                 iface_info.index,
                 &host,
-                iface_info.mac.clone(),
+                mac,
                 Ipv4Addr::new(10, 255, 0, 1),
                 Ipv4Addr::new(10, 255, 0, 2),
                 false,
