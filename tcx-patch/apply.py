@@ -2167,6 +2167,36 @@ def main() -> None:
         "            &backbone.paths().napt_from_wan,\n"
         "        )?;\n",
     )
+    # 22) Policy-change hook: flush both fast-path caches when rules change.
+    patch(
+        "landscape-ebpf/src/maps/nat/mod.rs",
+        "mod init;\n",
+        "mod flush;\nmod init;\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/mod.rs",
+        "pub use init::*;\n",
+        "pub use flush::*;\npub use init::*;\n",
+    )
+    patch(
+        "landscape-ebpf/src/runtime_impls.rs",
+        "        if let Err(e) = maps::flow::reconcile_flow_match_map(&self.rt.paths, configs) {\n"
+        "            tracing::error!(\"reconcile flow match map error: {e:?}\");\n"
+        "        }\n"
+        "    }\n",
+        "        if let Err(e) = maps::flow::reconcile_flow_match_map(&self.rt.paths, configs) {\n"
+        "            tracing::error!(\"reconcile flow match map error: {e:?}\");\n"
+        "        }\n"
+        "        // The split decision is cached per flow; drop it so new rules apply now.\n"
+        "        maps::nat::flush_fast_caches(&self.rt.paths);\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-ebpf/src/runtime_impls.rs",
+        "        maps::flow_wanip::add_wan_ip_mark(&self.rt.paths, flow_id, ips);\n",
+        "        maps::flow_wanip::add_wan_ip_mark(&self.rt.paths, flow_id, ips);\n"
+        "        maps::nat::flush_fast_caches(&self.rt.paths);\n",
+    )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 
