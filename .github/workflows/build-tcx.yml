@@ -73,6 +73,14 @@ jobs:
             echo "::error::lib.rs was not patched with 'pub mod tcx;'"
             exit 1
           }
+          test -f src/landscape-ebpf/src/bpf/nat_v4/nat4_proto.h || {
+            echo "::error::nat4_proto.h missing"
+            exit 1
+          }
+          grep -q 'napt_is_nonport_protocol' src/landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h || {
+            echo "::error::NAT non-port protocol support missing"
+            exit 1
+          }
 
       - name: Show overlay changes
         run: |
