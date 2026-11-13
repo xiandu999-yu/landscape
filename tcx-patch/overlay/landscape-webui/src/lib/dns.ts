@@ -181,12 +181,14 @@ export enum DNSResolveModeEnum {
 
 export enum DnsUpstreamTypeEnum {
   Plaintext = "plaintext",
+  Tcp = "tcp",
   Tls = "tls",
   Https = "https",
 }
 
 export enum CloudflareMode {
   Plaintext = "plaintext",
+  Tcp = "tcp",
   Tls = "tls",
   Https = "https",
 }

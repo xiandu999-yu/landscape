@@ -280,78 +280,42 @@ async function import_rules() {
           :span="2"
           :label="t('dns.upstream_edit.min_conns')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.min_conns"
-            :min="0"
-            :max="4"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.min_conns" :min="0" :max="4" clearable style="width: 100%" />
         </n-form-item-gi>
         <n-form-item-gi
           v-if="rule.use_experimental_pool"
           :span="2"
           :label="t('dns.upstream_edit.max_conns')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.max_conns"
-            :min="1"
-            :max="16"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.max_conns" :min="1" :max="16" clearable style="width: 100%" />
         </n-form-item-gi>
         <n-form-item-gi
           v-if="rule.use_experimental_pool"
           :span="2"
           :label="t('dns.upstream_edit.idle_timeout')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.idle_timeout_secs"
-            :min="5"
-            :max="3600"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.idle_timeout_secs" :min="5" :max="3600" clearable style="width: 100%" />
         </n-form-item-gi>
         <n-form-item-gi
           v-if="rule.use_experimental_pool"
           :span="2"
           :label="t('dns.upstream_edit.connect_timeout')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.connect_timeout_ms"
-            :min="200"
-            :max="10000"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.connect_timeout_ms" :min="200" :max="10000" clearable style="width: 100%" />
         </n-form-item-gi>
         <n-form-item-gi
           v-if="rule.use_experimental_pool"
           :span="2"
           :label="t('dns.upstream_edit.attempts')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.attempts"
-            :min="1"
-            :max="5"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.attempts" :min="1" :max="5" clearable style="width: 100%" />
         </n-form-item-gi>
         <n-form-item-gi
           v-if="rule.use_experimental_pool"
           :span="2"
           :label="t('dns.upstream_edit.max_fanout')"
         >
-          <n-input-number
-            v-model:value="rule.bind_config.max_fanout"
-            :min="1"
-            :max="8"
-            clearable
-            style="width: 100%"
-          />
+          <n-input-number v-model:value="rule.bind_config.max_fanout" :min="1" :max="8" clearable style="width: 100%" />
         </n-form-item-gi>
 
         <n-form-item-gi
