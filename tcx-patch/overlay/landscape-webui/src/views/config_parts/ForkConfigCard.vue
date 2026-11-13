@@ -19,6 +19,7 @@ const config = ref<ForkConfig>({
   qos_upload_kbit: 0,
   qos_download_kbit: 0,
   qos_qdisc: "cake",
+  qos_mode: "htb",
 });
 
 async function load() {

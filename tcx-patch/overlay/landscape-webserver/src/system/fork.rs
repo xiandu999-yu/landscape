@@ -30,9 +30,12 @@ pub struct ForkConfig {
     /// Forwarded-traffic download rate. 0 = no aggregate limit.
     #[serde(default)]
     pub qos_download_kbit: u32,
-    /// `cake` or `fq_codel` (reserved for the qdisc stage).
+    /// `cake` or `fq_codel` (leaf qdisc).
     #[serde(default = "default_qdisc")]
     pub qos_qdisc: String,
+    /// `htb` (single precise), `mq` (per-hardware-queue) or `ifb` (redirect).
+    #[serde(default = "default_mode")]
+    pub qos_mode: String,
 }
 
 fn default_true() -> bool {
@@ -40,6 +43,9 @@ fn default_true() -> bool {
 }
 fn default_qdisc() -> String {
     "cake".to_string()
+}
+fn default_mode() -> String {
+    "htb".to_string()
 }
 
 impl Default for ForkConfig {
@@ -50,6 +56,7 @@ impl Default for ForkConfig {
             qos_upload_kbit: 0,
             qos_download_kbit: 0,
             qos_qdisc: default_qdisc(),
+            qos_mode: default_mode(),
         }
     }
 }
@@ -99,6 +106,12 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
         return Err(DbError::Internal(format!(
             "unsupported qdisc: {}",
             config.qos_qdisc
+        )));
+    }
+    if config.qos_mode != "htb" && config.qos_mode != "mq" && config.qos_mode != "ifb" {
+        return Err(DbError::Internal(format!(
+            "unsupported qos mode: {}",
+            config.qos_mode
         )));
     }
     Ok(())
@@ -161,6 +174,7 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
             config.qos_upload_kbit,
             "upload",
             &config.qos_qdisc,
+            &config.qos_mode,
         ) {
             tracing::warn!(%iface, %error, "qos shaper: upload failed");
         }
@@ -171,6 +185,7 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
             config.qos_download_kbit,
             "download",
             &config.qos_qdisc,
+            &config.qos_mode,
         ) {
             tracing::warn!(%iface, %error, "qos shaper: download failed");
         }

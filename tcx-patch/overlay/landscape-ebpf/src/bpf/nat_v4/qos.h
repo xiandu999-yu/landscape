@@ -33,6 +33,8 @@ struct {
     __type(value, struct qos_forward_cfg);
 } qos_forward_cfg SEC(".maps");
 
+/* Kept pinned for compatibility with the existing map plumbing.  The data
+ * path no longer reads or updates it; there is no eBPF token bucket. */
 struct qos_bucket {
     __u64 tokens;
     __u64 last_ns;
@@ -50,43 +52,11 @@ static __always_inline int qos_check(struct __sk_buff *skb, __u32 dir, __u32 len
     struct qos_forward_cfg *cfg = bpf_map_lookup_elem(&qos_forward_cfg, &cfg_key);
     if (!cfg || !cfg->enabled) return TC_ACT_OK;
 
-    /* Mark this as a forwarded packet for the HTB default/1:10 classes. */
+    /* Mark this as a forwarded packet for the HTB default/1:10 classes.
+     * Shaping is done entirely by the qdisc; no eBPF policing here. */
     skb->priority = QOS_CLASS_PRIORITY;
-
-    __u64 rate = dir == QOS_DIR_DOWNLOAD ? cfg->download_bps : cfg->upload_bps;
-    if (!rate) return TC_ACT_OK;
-
-    __u32 bucket_key = dir;
-    struct qos_bucket *bucket = bpf_map_lookup_elem(&qos_bucket, &bucket_key);
-    if (!bucket) return TC_ACT_OK;
-
-    __u64 now = bpf_ktime_get_ns();
-    __u64 last = bucket->last_ns;
-    if (last == 0) {
-        if (__sync_val_compare_and_swap(&bucket->last_ns, 0, now) == 0) {
-            __u64 burst = rate / 10;
-            if (burst < 1500) burst = 1500;
-            bucket->tokens = burst;
-        }
-    } else if (now > last) {
-        if (__sync_val_compare_and_swap(&bucket->last_ns, last, now) == last) {
-            __u64 add = (now - last) * rate / 1000000000ULL;
-            if (add) {
-                __u64 burst = rate / 10;
-                if (burst < 1500) burst = 1500;
-                __u64 after = __sync_fetch_and_add(&bucket->tokens, add) + add;
-                if (after > burst) {
-                    __sync_val_compare_and_swap(&bucket->tokens, after, burst);
-                }
-            }
-        }
-    }
-
-    __u64 old = __sync_fetch_and_add(&bucket->tokens, (__u64)(-(__s64)len));
-    if (old < len) {
-        __sync_fetch_and_add(&bucket->tokens, len);
-        return TC_ACT_SHOT;
-    }
+    (void)dir;
+    (void)len;
     return TC_ACT_OK;
 }
 

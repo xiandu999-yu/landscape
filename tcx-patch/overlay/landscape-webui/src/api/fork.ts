@@ -7,6 +7,7 @@ export interface ForkConfig {
   qos_upload_kbit: number;
   qos_download_kbit: number;
   qos_qdisc: "cake" | "fq_codel";
+  qos_mode: "htb" | "mq" | "ifb";
 }
 
 const forkApi = applyInterceptors(

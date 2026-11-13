@@ -13,6 +13,7 @@ const saving = ref(false);
 const upload_mbps = ref(0);
 const download_mbps = ref(0);
 const qdisc = ref<ForkConfig["qos_qdisc"]>("cake");
+const mode = ref<ForkConfig["qos_mode"]>("htb");
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -25,6 +26,7 @@ async function load() {
     upload_mbps.value = to_mbps(config.qos_upload_kbit);
     download_mbps.value = to_mbps(config.qos_download_kbit);
     qdisc.value = config.qos_qdisc === "fq_codel" ? "fq_codel" : "cake";
+    mode.value = config.qos_mode ?? "htb";
   } catch (error) {
     console.error("load fork qos failed", error);
     message.error("读取 QoS 配置失败");
@@ -42,6 +44,7 @@ async function save() {
       qos_upload_kbit: Math.max(0, Math.round(upload_mbps.value * 1000)),
       qos_download_kbit: Math.max(0, Math.round(download_mbps.value * 1000)),
       qos_qdisc: qdisc.value,
+      qos_mode: mode.value,
     });
     message.success("QoS 配置已保存");
     emit("saved");
@@ -70,7 +73,8 @@ async function save() {
           <n-alert type="info" :bordered="false">
             只作用于 Landscape 转发的流量。本机、LAN-to-LAN 不进入 QoS。
             当前仅支持单 WAN；多 LAN 会全部应用同一下行策略。
-            当前是 eBPF token bucket + 转发 HTB 整形；叶子队列支持 CAKE / fq_codel。
+            整形全部交给 qdisc，eBPF 只标记转发包，不做 token bucket 丢包。
+            HTB 精确但单队列；MQ 保留硬件多队列；IFB 实验模式。
             数值单位 Mbps；0 表示不限制。
           </n-alert>
 
@@ -91,6 +95,17 @@ async function save() {
                 :max="100000"
                 :step="10"
                 style="width: 180px"
+              />
+            </n-form-item>
+            <n-form-item label="队列模式">
+              <n-select
+                v-model:value="mode"
+                :options="[
+                  { label: 'HTB 单队列（精确）', value: 'htb' },
+                  { label: 'MQ 多队列（保留硬件队列）', value: 'mq' },
+                  { label: 'IFB 全局（实验）', value: 'ifb' },
+                ]"
+                style="width: 280px"
               />
             </n-form-item>
             <n-form-item label="队列算法">
