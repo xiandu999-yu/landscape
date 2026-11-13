@@ -27,6 +27,9 @@ export async function get_tcx_order(): Promise<TcxOrderResponse> {
 }
 
 /** PUT /api/v1/system/tcx/order */
-export async function update_tcx_order(rules: TcxIfaceRule[]): Promise<void> {
-  await tcxApi.put("/tcx/order", { rules });
+export async function update_tcx_order(
+  rules: TcxIfaceRule[],
+  mode: string,
+): Promise<void> {
+  await tcxApi.put("/tcx/order", { rules, mode });
 }

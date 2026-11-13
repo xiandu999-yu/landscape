@@ -20,6 +20,7 @@ const config = ref<ForkConfig>({
   qos_download_kbit: 0,
   qos_qdisc: "cake",
   qos_mode: "htb",
+  tcx_mode: "auto",
 });
 
 async function load() {

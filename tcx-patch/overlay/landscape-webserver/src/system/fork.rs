@@ -36,6 +36,9 @@ pub struct ForkConfig {
     /// `htb` (single precise), `mq` (per-hardware-queue) or `ifb` (redirect).
     #[serde(default = "default_mode")]
     pub qos_mode: String,
+    /// TCX attach mode: `auto`, `tcx` or `tc`.
+    #[serde(default = "default_tcx_mode")]
+    pub tcx_mode: String,
 }
 
 fn default_true() -> bool {
@@ -47,6 +50,9 @@ fn default_qdisc() -> String {
 fn default_mode() -> String {
     "htb".to_string()
 }
+fn default_tcx_mode() -> String {
+    "auto".to_string()
+}
 
 impl Default for ForkConfig {
     fn default() -> Self {
@@ -57,6 +63,7 @@ impl Default for ForkConfig {
             qos_download_kbit: 0,
             qos_qdisc: default_qdisc(),
             qos_mode: default_mode(),
+            tcx_mode: default_tcx_mode(),
         }
     }
 }
@@ -96,6 +103,20 @@ fn write_config(config: &ForkConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn current_tcx_mode() -> String {
+    read_config().tcx_mode
+}
+
+pub(crate) fn set_tcx_mode(mode: &str) -> Result<(), DbError> {
+    let mut config = read_config();
+    config.tcx_mode = mode.to_string();
+    validate(&config)?;
+    write_config(&config)
+        .map_err(|error| DbError::Internal(format!("write fork.json: {error}")))?;
+    landscape_ebpf::tcx::reload_from_env();
+    Ok(())
+}
+
 fn validate(config: &ForkConfig) -> Result<(), DbError> {
     if config.qos_upload_kbit > 100_000_000 || config.qos_download_kbit > 100_000_000 {
         return Err(DbError::Internal(
@@ -113,6 +134,23 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
             "unsupported qos mode: {}",
             config.qos_mode
         )));
+    }
+    if config.tcx_mode != "auto" && config.tcx_mode != "tcx" && config.tcx_mode != "tc" {
+        return Err(DbError::Internal(format!(
+            "unsupported tcx mode: {}",
+            config.tcx_mode
+        )));
+    }
+    let effective_tcx = if config.tcx_mode == "tc" {
+        landscape_ebpf::tcx::Mode::Off
+    } else {
+        landscape_ebpf::tcx::current_mode()
+    };
+    if config.qos_enabled && effective_tcx == landscape_ebpf::tcx::Mode::Off {
+        return Err(DbError::Internal(
+            "QoS requires TCX; current mode is TC (legacy clsact). Change TCX 模式 to Auto or TCX first."
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -253,6 +291,7 @@ pub async fn update_fork_config(
     {
         tracing::warn!(%error, "qos: runtime map update failed");
     }
+    landscape_ebpf::tcx::reload_from_env();
     apply_shaper(&app, &config).await;
     LandscapeApiResp::success(())
 }

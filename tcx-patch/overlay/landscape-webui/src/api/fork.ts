@@ -8,6 +8,7 @@ export interface ForkConfig {
   qos_download_kbit: number;
   qos_qdisc: "cake" | "fq_codel";
   qos_mode: "htb" | "mq" | "ifb";
+  tcx_mode: "auto" | "tcx" | "tc";
 }
 
 const forkApi = applyInterceptors(

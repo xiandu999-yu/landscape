@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { useMessage } from "naive-ui";
 
 import { get_fork_config, update_fork_config, type ForkConfig } from "@/api/fork";
+import { get_tcx_order } from "@/api/tcx_order";
 
 const show_model = defineModel<boolean>("show", { required: true });
 const emit = defineEmits<{ saved: [] }>();
@@ -14,6 +15,7 @@ const upload_mbps = ref(0);
 const download_mbps = ref(0);
 const qdisc = ref<ForkConfig["qos_qdisc"]>("cake");
 const mode = ref<ForkConfig["qos_mode"]>("htb");
+const tcx_mode = ref("auto");
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -27,6 +29,7 @@ async function load() {
     download_mbps.value = to_mbps(config.qos_download_kbit);
     qdisc.value = config.qos_qdisc === "fq_codel" ? "fq_codel" : "cake";
     mode.value = config.qos_mode ?? "htb";
+    tcx_mode.value = (await get_tcx_order()).mode ?? "auto";
   } catch (error) {
     console.error("load fork qos failed", error);
     message.error("读取 QoS 配置失败");
@@ -70,6 +73,10 @@ async function save() {
     >
       <n-spin :show="loading">
         <n-flex vertical>
+          <n-alert v-if="tcx_mode === 'tc'" type="warning" :bordered="false">
+            TCX 模式当前是 TC（传统 clsact）。QoS 依赖 TCX，TC 模式下无法启用，
+            请先在“路由转发服务 -> TCX 模式”改为 Auto 或 TCX。
+          </n-alert>
           <n-alert type="info" :bordered="false">
             只作用于 Landscape 转发的流量。本机、LAN-to-LAN 不进入 QoS。
             当前仅支持单 WAN；多 LAN 会全部应用同一下行策略。
@@ -125,7 +132,14 @@ async function save() {
       <template #footer>
         <n-flex justify="end" :size="12">
           <n-button @click="show_model = false">取消</n-button>
-          <n-button type="primary" :loading="saving" @click="save">保存 QoS</n-button>
+          <n-button
+            type="primary"
+            :loading="saving"
+            :disabled="tcx_mode === 'tc'"
+            @click="save"
+          >
+            保存 QoS
+          </n-button>
         </n-flex>
       </template>
     </n-card>

@@ -38,6 +38,7 @@ const egress_mode = ref<Mode>("inherit");
 const egress_pos = ref<number>(0);
 const egress_prog = ref<string>("");
 const global_order = ref<string>("last");
+const tcx_mode = ref<string>("auto");
 
 function parse_spec(
   spec: string | undefined,
@@ -77,6 +78,7 @@ async function load() {
   try {
     const resp = await get_tcx_order();
     global_order.value = resp.global_order;
+    tcx_mode.value = resp.mode ?? "auto";
     const rule = resp.rules.find((r) => r.name === props.iface_name);
     const [im, ip, iprog] = parse_spec(rule?.ingress);
     ingress_mode.value = im;
@@ -111,7 +113,7 @@ async function save() {
     if (ingress !== "" || egress !== "") {
       rules.push({ name: props.iface_name, ingress, egress });
     }
-    await update_tcx_order(rules);
+    await update_tcx_order(rules, tcx_mode.value);
     message.success(
       "TCX 顺序已保存；重启该接口的路由转发服务（重新点“更新”）后生效",
     );
@@ -128,6 +130,20 @@ onMounted(load);
 <template>
   <n-divider style="margin: 12px 0">TCX 顺序（{{ iface_name }}）</n-divider>
   <n-form label-placement="left" label-width="120" :disabled="loading">
+    <n-form-item label="TCX 模式">
+      <n-select
+        v-model:value="tcx_mode"
+        :options="[
+          { label: 'Auto（环境变量优先）', value: 'auto' },
+          { label: 'TCX（强制 TCX）', value: 'tcx' },
+          { label: 'TC（传统 clsact）', value: 'tc' },
+        ]"
+        style="width: 240px"
+      />
+      <n-text depth="3" style="margin-left: 10px">
+        Auto 时读取 LANDSCAPE_TCX_MODE；TCX/TC 覆盖环境变量
+      </n-text>
+    </n-form-item>
     <n-form-item label="Ingress 顺序">
       <n-select
         v-model:value="ingress_mode"

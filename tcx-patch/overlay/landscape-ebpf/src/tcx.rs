@@ -187,17 +187,82 @@ fn load_rules_file() -> Vec<IfaceRule> {
     out
 }
 
+fn mode_from_str(value: &str) -> Option<Mode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(Mode::Auto),
+        "tc" | "off" | "clsact" => Some(Mode::Off),
+        "tcx" | "require" | "on" => Some(Mode::Require),
+        _ => None,
+    }
+}
+
+fn rules_path() -> Option<std::path::PathBuf> {
+    std::env::var("LANDSCAPE_TCX_RULES_FILE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::Path::new(&h).join(".landscape-router").join("tcx-order.json"))
+        })
+}
+
+fn load_file_mode() -> Option<Mode> {
+    // Primary source: fork.json (all fork runtime settings live there).
+    if let Some(path) = std::env::var("LANDSCAPE_FORK_CONFIG_FILE")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::Path::new(&h).join(".landscape-router").join("fork.json"))
+        })
+    {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            if let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(mode) = doc.get("tcx_mode").and_then(|v| v.as_str()) {
+                    if let Some(mode) = mode_from_str(mode) {
+                        return Some(mode);
+                    }
+                }
+            }
+        }
+    }
+
+    // Backward compatibility: the old tcx-order.json carried the mode too.
+    let path = rules_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let doc = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    doc.get("mode").and_then(|v| v.as_str()).and_then(mode_from_str)
+}
+
+pub fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Auto => "auto",
+        Mode::Off => "tc",
+        Mode::Require => "tcx",
+    }
+}
+
+pub fn current_mode() -> Mode {
+    slot().read().map(|guard| guard.mode).unwrap_or(Mode::Auto)
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let mut cfg = Config::default();
 
-        if let Ok(v) = std::env::var("LANDSCAPE_TCX_MODE") {
-            cfg.mode = match v.trim().to_ascii_lowercase().as_str() {
-                "off" | "clsact" => Mode::Off,
-                "require" | "on" | "tcx" => Mode::Require,
-                _ => Mode::Auto,
-            };
-        }
+        // Explicit file mode wins. The environment is consulted only when the
+        // file says "auto" (or does not exist).
+        cfg.mode = match load_file_mode() {
+            Some(mode) if mode != Mode::Auto => mode,
+            _ => std::env::var("LANDSCAPE_TCX_MODE")
+                .ok()
+                .and_then(|value| mode_from_str(&value))
+                .unwrap_or(Mode::Auto),
+        };
 
         cfg.strict = std::env::var("LANDSCAPE_TCX_STRICT")
             .map(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"))
