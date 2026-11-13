@@ -7,6 +7,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "nat_v4/tc_modify_head.h"
+#include "nat_v4/qos.h"
 
 /*
  * Egress NAT fast path (flow-offload style, opt-in via LANDSCAPE_NAT_FASTPATH).

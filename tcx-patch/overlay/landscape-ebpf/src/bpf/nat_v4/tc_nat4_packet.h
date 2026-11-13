@@ -13,6 +13,7 @@
 #include "nat_v4/nat4_proto.h"
 #include "nat_v4/tc_nat4.h"
 #include "nat_v4/tc_nat4_rodata.h"
+#include "nat_v4/qos.h"
 
 static __always_inline int napt_is_icmp_error(const struct tc_nat_view *view) {
     return view->icmp_inner_l4_offset != 0;
@@ -182,6 +183,8 @@ static __always_inline int napt_wan_state(struct __sk_buff *skb, const struct tc
         if (napt_ct_advance(view, NAPT_GRESS_WAN, ct) != TC_ACT_OK) return TC_ACT_SHOT;
         napt_metric_accumulate(skb, NAPT_GRESS_WAN, ct);
     }
+
+    if (qos_check(skb, QOS_DIR_DOWNLOAD, skb->len) != TC_ACT_OK) return TC_ACT_SHOT;
 
     *new_addr = target_addr;
     *new_port = mapping->internal_port;

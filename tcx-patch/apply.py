@@ -974,6 +974,7 @@ def main() -> None:
         "        u32 chain = tc_cb_chain(skb);\n"
         "        bpf_tail_call(skb, &tc_wan_egress_roots, chain);\n",
         "    if (tc_cb_forwarded(skb)) {\n"
+        "        if (qos_check(skb, QOS_DIR_UPLOAD, skb->len) != TC_ACT_OK) return TC_ACT_SHOT;\n"
         "        // Fast path: an established flow skips the whole egress chain.\n"
         "        if (nat_fast_try(skb, current_l3_offset)) return TC_ACT_OK;\n"
         "        u32 chain = tc_cb_chain(skb);\n"
@@ -1412,7 +1413,15 @@ def main() -> None:
         "    crate::bpf_ctx!(\n"
         "        pin_and_reuse_map(&mut egress_route_open_skel.maps.fa4_stats, &paths.fa4_stats),\n"
         '        "tc_wan_egress_route pin fa4_stats"\n'
-        "    )?;\n",
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.qos_forward_cfg, &paths.root.join(\"qos_forward_cfg\")),\n"
+        '        "tc_wan_egress_route pin qos_forward_cfg"\n'
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut egress_route_open_skel.maps.qos_bucket, &paths.root.join(\"qos_bucket\")),\n"
+        '        "tc_wan_egress_route pin qos_bucket"\n'
+        "    )?;\n"
     )
     patch(
         "landscape-ebpf/src/chain/tc_wan_route.rs",
@@ -1425,7 +1434,15 @@ def main() -> None:
         "    crate::bpf_ctx!(\n"
         "        pin_and_reuse_map(&mut open_skel.maps.fa4_stats, &paths.fa4_stats),\n"
         '        "tc_wan_egress pin fa4_stats"\n'
-        "    )?;\n",
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.qos_forward_cfg, &paths.root.join(\"qos_forward_cfg\")),\n"
+        '        "tc_wan_egress pin qos_forward_cfg"\n'
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut open_skel.maps.qos_bucket, &paths.root.join(\"qos_bucket\")),\n"
+        '        "tc_wan_egress pin qos_bucket"\n'
+        "    )?;\n"
     )
     # 14) CT-derived fast-path lifetime: the NAT stage hands the timeout it just
     #     armed to nat_fast_record(), so long-lived UDP flows keep their entry
@@ -1704,7 +1721,7 @@ def main() -> None:
         "int tc_wan_ingress_root(struct __sk_buff *skb) {\n"
         "    if (land_nat_fast_ingress) {\n"
         "        int fast = flow_core_try_wan(skb, current_l3_offset);\n"
-        "        if (fast == TC_ACT_REDIRECT) return fast;\n"
+        "        if (fast == TC_ACT_REDIRECT || fast == TC_ACT_SHOT) return fast;\n"
         "    }\n"
         "    tc_cb_ingress_stamp(skb, current_l3_offset, current_chain);\n",
     )
@@ -1932,7 +1949,9 @@ def main() -> None:
         "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n"
         "    pin_and_reuse_map(&mut open.maps.flow_core, &paths.flow_core)?;\n"
         "    pin_and_reuse_map(&mut open.maps.nat_wan_ctl, &paths.nat_wan_ctl)?;\n"
-        "    pin_and_reuse_map(&mut open.maps.nat_wan_stats, &paths.nat_wan_stats)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.nat_wan_stats, &paths.nat_wan_stats)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.qos_forward_cfg, &paths.root.join(\"qos_forward_cfg\"))?;\n"
+        "    pin_and_reuse_map(&mut open.maps.qos_bucket, &paths.root.join(\"qos_bucket\"))?;\n",
     )
     patch(
         "landscape-ebpf/src/maps/mac/setting.rs",
@@ -2196,6 +2215,277 @@ def main() -> None:
         "            &mut ingress_open_skel.maps.napt_from_wan,\n"
         "            &backbone.paths().napt_from_wan,\n"
         "        )?;\n",
+    )
+    # 23) Fork runtime settings + read-only fast-path monitoring.
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "pub mod landscape;\npub mod tcx;\npub mod nat_options;\n",
+        "pub mod landscape;\npub mod tcx;\npub mod nat_options;\npub mod fastpath_stats;\npub mod qos_runtime;\n",
+    )
+    patch(
+        "landscape-webserver/src/main.rs",
+        "    let iface_config_service = IfaceManagerService::new(db_store_provider.clone()).await;\n",
+        "    let iface_config_service = IfaceManagerService::new(db_store_provider.clone()).await;\n"
+        "\n"
+        "    startup_phase!(\"qos.restore\", crate::system::fork::apply_saved(&ebpf_paths.root));\n",
+    )
+    patch(
+        "landscape-webserver/src/system/mod.rs",
+        "pub mod nat_options;\n",
+        "pub mod nat_options;\n"
+        "pub mod fork;\n"
+        "pub mod fastpath;\n"
+        "pub mod qos_shaper;\n",
+    )
+    patch(
+        "landscape-webserver/src/system/config.rs",
+        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n",
+        "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n"
+        "        .routes(routes!(super::fork::get_fork_config, super::fork::update_fork_config))\n"
+        "        .routes(routes!(super::fastpath::get_fastpath_stats))\n",
+    )
+    patch(
+        "landscape-webui/src/views/Config.vue",
+        'import MetricConfigCard from "@/views/config_parts/MetricConfigCard.vue";\n',
+        'import MetricConfigCard from "@/views/config_parts/MetricConfigCard.vue";\n'
+        'import ForkConfigCard from "@/views/config_parts/ForkConfigCard.vue";\n',
+    )
+    patch(
+        "landscape-webui/src/views/Config.vue",
+        "        <MetricConfigCard />\n",
+        "        <MetricConfigCard />\n"
+        "        <ForkConfigCard />\n",
+    )
+    patch(
+        "landscape-webui/src/views/Config.vue",
+        '          <n-anchor-link\n'
+        '            :title="t(\'config.metric_title\')"\n'
+        '            href="#metric-config"\n'
+        '          />\n',
+        '          <n-anchor-link\n'
+        '            :title="t(\'config.metric_title\')"\n'
+        '            href="#metric-config"\n'
+        '          />\n'
+        '          <n-anchor-link title="Fork 功能" href="#fork-config" />\n',
+    )
+    patch(
+        "landscape-webui/src/router/metric.ts",
+        'import HistoryDstIpMetric from "@/views/metric/conn/HistoryDstIpMetric.vue";\n',
+        'import HistoryDstIpMetric from "@/views/metric/conn/HistoryDstIpMetric.vue";\n'
+        'import FastPathMetric from "@/views/metric/FastPathMetric.vue";\n',
+    )
+    patch(
+        "landscape-webui/src/router/metric.ts",
+        "  {\n"
+        '    path: "/metrics/dns",\n'
+        '    name: "routes.dns-metric",\n'
+        "    component: DNSMetric,\n"
+        '    meta: { capability: "metric_persistent" },\n'
+        "  },\n",
+        "  {\n"
+        '    path: "/metrics/dns",\n'
+        '    name: "routes.dns-metric",\n'
+        "    component: DNSMetric,\n"
+        '    meta: { capability: "metric_persistent" },\n'
+        "  },\n"
+        "  {\n"
+        '    path: "/metrics/fastpath",\n'
+        '    name: "routes.fastpath",\n'
+        "    component: FastPathMetric,\n"
+        "  },\n",
+    )
+    patch(
+        "landscape-webui/src/views/LandscapeSiderBar.vue",
+        "        {\n"
+        '          label: t("routes.connect-history"),\n'
+        '          key: "metrics/conn/history",\n'
+        "        },\n",
+        "        {\n"
+        '          label: t("routes.connect-history"),\n'
+        '          key: "metrics/conn/history",\n'
+        "        },\n"
+        "        {\n"
+        '          label: "快速路径",\n'
+        '          key: "metrics/fastpath",\n'
+        "        },\n",
+    )
+    # 24) Create/pin QoS maps before any TCX link starts.  The egress route
+    #     starts before the NAT service, so it cannot be the first pinner.
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n',
+        'pub(crate) const FA4_STATS_PIN: &str = "fa4_stats";\n'
+        'pub(crate) const QOS_FORWARD_CFG_PIN: &str = "qos_forward_cfg";\n'
+        'pub(crate) const QOS_BUCKET_PIN: &str = "qos_bucket";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `fa4_stats` array at `path`.\n"
+        "pub fn init_fa4_stats(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `fa4_stats` array at `path`.\n"
+        "pub fn init_fa4_stats(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_STATS_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `qos_forward_cfg`: one global forwarding QoS policy.\n"
+        "pub(crate) const QOS_FORWARD_CFG_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: QOS_FORWARD_CFG_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 24,\n"
+        "    max_entries: 1,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "pub fn init_qos_forward_cfg(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&QOS_FORWARD_CFG_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `qos_bucket`: upload/download token buckets (2 x 16B).\n"
+        "pub(crate) const QOS_BUCKET_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Array,\n"
+        "    name: QOS_BUCKET_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 16,\n"
+        "    max_entries: 2,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "pub fn init_qos_bucket(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&QOS_BUCKET_SPEC, path)\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n',
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("init fa4_stats failed");\n'
+        '    nat::init_qos_forward_cfg(&paths.root.join("qos_forward_cfg"))\n'
+        '        .expect("init qos_forward_cfg failed");\n'
+        '    nat::init_qos_bucket(&paths.root.join("qos_bucket")).expect("init qos_bucket failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n',
+        '    nat::init_fa4_stats(&paths.fa4_stats).expect("test init fa4_stats");\n'
+        '    nat::init_qos_forward_cfg(&paths.root.join("qos_forward_cfg"))\n'
+        '        .expect("test init qos_forward_cfg");\n'
+        '    nat::init_qos_bucket(&paths.root.join("qos_bucket")).expect("test init qos_bucket");\n',
+    )
+    # 24a) Route changes must invalidate flow_core, not just neighbour changes.
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "use libbpf_rs::{MapHandle, MapType};\n",
+        "use libbpf_rs::{MapCore, MapFlags, MapHandle, MapType};\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `flow_core_ver` array at `path`.\n"
+        "pub fn init_flow_core_ver(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_VER_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `flow_core_ver` array at `path`.\n"
+        "pub fn init_flow_core_ver(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FLOW_CORE_VER_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// Invalidate flow_core records pointing at `ifindex` after a LAN route\n"
+        "/// add/delete.  Neighbour changes already bump the same slot.\n"
+        "pub fn bump_flow_core_ver(path: &Path, ifindex: u32) {\n"
+        "    let Ok(map) = MapHandle::from_pinned_path(path) else {\n"
+        "        return;\n"
+        "    };\n"
+        "    let key = ifindex.to_ne_bytes();\n"
+        "    let Ok(Some(value)) = map.lookup(&key, MapFlags::ANY) else {\n"
+        "        return;\n"
+        "    };\n"
+        "    if value.len() < 8 {\n"
+        "        return;\n"
+        "    }\n"
+        "    let cur = u64::from_ne_bytes(value[0..8].try_into().unwrap());\n"
+        "    let next = cur.wrapping_add(1).to_ne_bytes();\n"
+        "    let _ = map.update(&key, &next, MapFlags::ANY);\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/route/lan.rs",
+        "    let _ = add_lan_route_with_maps(\n"
+        "        &rt4_lan_map,\n"
+        "        &rt6_lan_map,\n"
+        "        &rt4_cache_map,\n"
+        "        &rt6_cache_map,\n"
+        "        &lan_info,\n"
+        "    );\n",
+        "    if add_lan_route_with_maps(\n"
+        "        &rt4_lan_map,\n"
+        "        &rt6_lan_map,\n"
+        "        &rt4_cache_map,\n"
+        "        &rt6_cache_map,\n"
+        "        &lan_info,\n"
+        "    ) {\n"
+        "        crate::maps::nat::bump_flow_core_ver(&paths.flow_core_ver, lan_info.ifindex);\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/route/lan.rs",
+        "    let _ = del_lan_route_with_maps(&rt4_lan_map, &rt6_lan_map, &lan_info);\n",
+        "    if del_lan_route_with_maps(&rt4_lan_map, &rt6_lan_map, &lan_info) {\n"
+        "        crate::maps::nat::bump_flow_core_ver(&paths.flow_core_ver, lan_info.ifindex);\n"
+        "    }\n",
+    )
+
+    # 24b) The ingress fast path now applies download QoS, so its skeleton
+    #      must share the same pinned QoS maps as NAT/egress.
+    patch(
+        "landscape-ebpf/src/chain/wan_link/tc.rs",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.nat_wan_stats,\n"
+        "            &backbone.paths().nat_wan_stats,\n"
+        "        )?;\n",
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.nat_wan_stats,\n"
+        "            &backbone.paths().nat_wan_stats,\n"
+        "        )?;\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.qos_forward_cfg,\n"
+        "            &backbone.paths().root.join(\"qos_forward_cfg\"),\n"
+        "        )?;\n"
+        "        pin_and_reuse_map(\n"
+        "            &mut ingress_open_skel.maps.qos_bucket,\n"
+        "            &backbone.paths().root.join(\"qos_bucket\"),\n"
+        "        )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/route_backbone.rs",
+        '            "tc_wan_ingress_route pin xdp_redirect_able"\n'
+        "        )?;\n",
+        '            "tc_wan_ingress_route pin xdp_redirect_able"\n'
+        "        )?;\n"
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(\n"
+        "                &mut open_skel.maps.qos_forward_cfg,\n"
+        "                &paths.root.join(\"qos_forward_cfg\"),\n"
+        "            ),\n"
+        '            "tc_wan_ingress_route pin qos_forward_cfg"\n'
+        "        )?;\n"
+        "        crate::bpf_ctx!(\n"
+        "            pin_and_reuse_map(&mut open_skel.maps.qos_bucket, &paths.root.join(\"qos_bucket\")),\n"
+        '            "tc_wan_ingress_route pin qos_bucket"\n'
+        "        )?;\n",
+    )
+
+    # 25) QoS shaper lifecycle: restore after services start, clear on shutdown.
+    # The startup qdisc restore is intentionally not called before the web
+    # listener is up: a bad tc state must never make the router unreachable.
+    # The shaper is applied when QoS settings are saved.
+    patch(
+        "landscape-webserver/src/main.rs",
+        "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
+        "    crate::system::fork::clear_shaper(&landscape_app_status).await;\n"
+        "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
     )
     print(f"TCX overlay applied (overlay={OVERLAY})")
 

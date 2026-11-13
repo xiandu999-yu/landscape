@@ -1,0 +1,118 @@
+<script setup lang="ts">
+import { ref } from "vue";
+import { useMessage } from "naive-ui";
+
+import { get_fork_config, update_fork_config, type ForkConfig } from "@/api/fork";
+
+const show_model = defineModel<boolean>("show", { required: true });
+const emit = defineEmits<{ saved: [] }>();
+const message = useMessage();
+
+const loading = ref(false);
+const saving = ref(false);
+const upload_mbps = ref(0);
+const download_mbps = ref(0);
+const qdisc = ref<ForkConfig["qos_qdisc"]>("cake");
+
+function to_mbps(kbit: number) {
+  return Math.round((kbit ?? 0) / 1000);
+}
+
+async function load() {
+  loading.value = true;
+  try {
+    const config = await get_fork_config();
+    upload_mbps.value = to_mbps(config.qos_upload_kbit);
+    download_mbps.value = to_mbps(config.qos_download_kbit);
+    qdisc.value = config.qos_qdisc === "fq_codel" ? "fq_codel" : "cake";
+  } catch (error) {
+    console.error("load fork qos failed", error);
+    message.error("读取 QoS 配置失败");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function save() {
+  saving.value = true;
+  try {
+    const current = await get_fork_config();
+    await update_fork_config({
+      ...current,
+      qos_upload_kbit: Math.max(0, Math.round(upload_mbps.value * 1000)),
+      qos_download_kbit: Math.max(0, Math.round(download_mbps.value * 1000)),
+      qos_qdisc: qdisc.value,
+    });
+    message.success("QoS 配置已保存");
+    emit("saved");
+    show_model.value = false;
+  } catch (error) {
+    console.error("save fork qos failed", error);
+    message.error("保存 QoS 配置失败");
+  } finally {
+    saving.value = false;
+  }
+}
+</script>
+
+<template>
+  <n-modal v-model:show="show_model" :auto-focus="false" @after-enter="load">
+    <n-card
+      style="width: 560px"
+      title="QoS 转发限速"
+      :bordered="false"
+      size="small"
+      role="dialog"
+      aria-modal="true"
+    >
+      <n-spin :show="loading">
+        <n-flex vertical>
+          <n-alert type="info" :bordered="false">
+            只作用于 Landscape 转发的流量。本机、LAN-to-LAN 不进入 QoS。
+            当前仅支持单 WAN；多 LAN 会全部应用同一下行策略。
+            当前是 eBPF token bucket + 转发 HTB 整形；叶子队列支持 CAKE / fq_codel。
+            数值单位 Mbps；0 表示不限制。
+          </n-alert>
+
+          <n-form label-placement="left" label-width="130">
+            <n-form-item label="全局上行 Mbps">
+              <n-input-number
+                v-model:value="upload_mbps"
+                :min="0"
+                :max="100000"
+                :step="10"
+                style="width: 180px"
+              />
+            </n-form-item>
+            <n-form-item label="全局下行 Mbps">
+              <n-input-number
+                v-model:value="download_mbps"
+                :min="0"
+                :max="100000"
+                :step="10"
+                style="width: 180px"
+              />
+            </n-form-item>
+            <n-form-item label="队列算法">
+              <n-select
+                v-model:value="qdisc"
+                :options="[
+                  { label: 'CAKE（推荐）', value: 'cake' },
+                  { label: 'fq_codel（仅公平队列）', value: 'fq_codel' },
+                ]"
+                style="width: 280px"
+              />
+            </n-form-item>
+          </n-form>
+        </n-flex>
+      </n-spin>
+
+      <template #footer>
+        <n-flex justify="end" :size="12">
+          <n-button @click="show_model = false">取消</n-button>
+          <n-button type="primary" :loading="saving" @click="save">保存 QoS</n-button>
+        </n-flex>
+      </template>
+    </n-card>
+  </n-modal>
+</template>

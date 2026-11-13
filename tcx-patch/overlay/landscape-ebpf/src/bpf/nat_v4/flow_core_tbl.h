@@ -11,6 +11,7 @@
 #include "nat_v4/flow_ver.h"
 #include "nat_v4/flow_wan_check.h"
 #include "nat_v4/tc_modify_head.h"
+#include "nat_v4/qos.h"
 
 /*
  * Record/consume the WAN2LAN core record.
@@ -57,6 +58,9 @@ static __always_inline void flow_core_record_wan(__be32 remote_addr, __be16 remo
 #define FLOW_CORE_EXIT_PULL 7
 #define FLOW_CORE_EXIT_MAC 8
 #define FLOW_CORE_EXIT_MAPPING 9
+#define FLOW_CORE_EXIT_TTL 10
+#define FLOW_CORE_EXIT_MTU 11
+#define FLOW_CORE_SAFE_L3_MTU 1500U
 
 /* Returns TC_ACT_REDIRECT when served from the core table, TC_ACT_OK otherwise. */
 static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off) {
@@ -115,10 +119,34 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
         return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAPPING);
     }
 
+    /* The ingress fast path skips the NAT stage, so it must apply the
+     * download-side QoS here; otherwise fast-path hits bypass shaping. */
+    if (qos_check(skb, QOS_DIR_DOWNLOAD, skb->len) != TC_ACT_OK) return TC_ACT_SHOT;
+
+    /* A redirect from ingress bypasses the IP forwarding path.  Keep TTL
+     * handling here instead of leaking an undecremented TTL.  TTL <= 1 must
+     * go back to the slow path so the kernel can emit ICMP Time Exceeded. */
+    if (iph.ttl <= 1) return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+    if (skb->len > l3_off + FLOW_CORE_SAFE_L3_MTU)
+        return flow_core_ctl_set(7, FLOW_CORE_EXIT_MTU);
+
     /* napt_modify() rewrites through direct packet access, so the bytes must be
      * linear first. */
     __u32 need = l3_off + ihl + 20;
     if (bpf_skb_pull_data(skb, need)) return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
+
+    /* The TTL byte is adjacent to protocol; update both as one network-order
+     * 16-bit word so the IPv4 header checksum stays valid. */
+    __be16 old_ttl_proto;
+    __builtin_memcpy(&old_ttl_proto, &iph.ttl, sizeof(old_ttl_proto));
+    __be16 new_ttl_proto = old_ttl_proto - bpf_htons(0x0100);
+    if (bpf_l3_csum_replace(skb, l3_off + __builtin_offsetof(struct iphdr, check),
+                            old_ttl_proto, new_ttl_proto, sizeof(__be16)))
+        return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+    if (bpf_skb_store_bytes(skb, l3_off + __builtin_offsetof(struct iphdr, ttl),
+                            &new_ttl_proto, sizeof(new_ttl_proto), 0))
+        return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+
     if (napt_modify(skb, value->internal_addr, value->internal_port, LAND_FRAG_FROM_WAN, l3_off) !=
         TC_ACT_OK)
         return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
