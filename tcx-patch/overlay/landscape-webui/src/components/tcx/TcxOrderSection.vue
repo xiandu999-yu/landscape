@@ -114,6 +114,7 @@ async function save() {
       rules.push({ name: props.iface_name, ingress, egress, mode: tcx_mode.value });
     }
     await update_tcx_order(rules, tcx_mode.value);
+    window.dispatchEvent(new CustomEvent("landscape-tcx-mode-changed"));
     message.success(
       "TCX 顺序已保存；重启该接口的路由转发服务（重新点“更新”）后生效",
     );

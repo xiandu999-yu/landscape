@@ -2,8 +2,13 @@
 import { ref } from "vue";
 import { useMessage } from "naive-ui";
 
-import { get_fork_config, update_fork_config, type ForkConfig } from "@/api/fork";
-import { get_tcx_order } from "@/api/tcx_order";
+import {
+  get_iface_qos,
+  get_qos_targets,
+  update_iface_qos,
+  type IfaceQosRule,
+  type QosTarget,
+} from "@/api/fork";
 
 const show_model = defineModel<boolean>("show", { required: true });
 const emit = defineEmits<{ saved: [] }>();
@@ -11,11 +16,15 @@ const message = useMessage();
 
 const loading = ref(false);
 const saving = ref(false);
-const upload_mbps = ref(0);
-const download_mbps = ref(0);
-const qdisc = ref<ForkConfig["qos_qdisc"]>("cake");
-const mode = ref<ForkConfig["qos_mode"]>("htb");
-const tcx_mode = ref("auto");
+const iface_edits = ref<
+  Array<
+    QosTarget & {
+      enabled: boolean;
+      upload_mbps: number;
+      download_mbps: number;
+    }
+  >
+>([]);
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -24,12 +33,22 @@ function to_mbps(kbit: number) {
 async function load() {
   loading.value = true;
   try {
-    const config = await get_fork_config();
-    upload_mbps.value = to_mbps(config.qos_upload_kbit);
-    download_mbps.value = to_mbps(config.qos_download_kbit);
-    qdisc.value = config.qos_qdisc === "fq_codel" ? "fq_codel" : "cake";
-    mode.value = config.qos_mode ?? "htb";
-    tcx_mode.value = (await get_tcx_order()).mode ?? "auto";
+    const [targets, rules] = await Promise.all([
+      get_qos_targets(),
+      get_iface_qos(),
+    ]);
+    const by_name = new Map<string, IfaceQosRule>(
+      rules.map((rule) => [rule.name, rule]),
+    );
+    iface_edits.value = targets.map((target) => {
+      const rule = by_name.get(target.name);
+      return {
+        ...target,
+        enabled: rule?.enabled ?? false,
+        upload_mbps: to_mbps(rule?.upload_kbit ?? 0),
+        download_mbps: to_mbps(rule?.download_kbit ?? 0),
+      };
+    });
   } catch (error) {
     console.error("load fork qos failed", error);
     message.error("读取 QoS 配置失败");
@@ -41,20 +60,24 @@ async function load() {
 async function save() {
   saving.value = true;
   try {
-    const current = await get_fork_config();
-    await update_fork_config({
-      ...current,
-      qos_upload_kbit: Math.max(0, Math.round(upload_mbps.value * 1000)),
-      qos_download_kbit: Math.max(0, Math.round(download_mbps.value * 1000)),
-      qos_qdisc: qdisc.value,
-      qos_mode: mode.value,
-    });
-    message.success("QoS 配置已保存");
+    if (iface_edits.value.length === 0) {
+      message.error("没有可配置的 WAN/LAN 网口");
+      return;
+    }
+    for (const edit of iface_edits.value) {
+      await update_iface_qos({
+        name: edit.name,
+        enabled: edit.enabled,
+        upload_kbit: Math.max(0, Math.round(edit.upload_mbps * 1000)),
+        download_kbit: Math.max(0, Math.round(edit.download_mbps * 1000)),
+      });
+    }
+    message.success("QoS 已保存");
     emit("saved");
     show_model.value = false;
   } catch (error) {
     console.error("save fork qos failed", error);
-    message.error("保存 QoS 配置失败");
+    message.error("保存 QoS 失败");
   } finally {
     saving.value = false;
   }
@@ -64,8 +87,8 @@ async function save() {
 <template>
   <n-modal v-model:show="show_model" :auto-focus="false" @after-enter="load">
     <n-card
-      style="width: 560px"
-      title="QoS 转发限速"
+      style="width: 640px"
+      title="QoS 转发限速（SQM）"
       :bordered="false"
       size="small"
       role="dialog"
@@ -73,57 +96,38 @@ async function save() {
     >
       <n-spin :show="loading">
         <n-flex vertical>
-          <n-alert v-if="tcx_mode === 'tc'" type="warning" :bordered="false">
-            TCX 模式当前是 TC（传统 clsact）。全局 QoS 不可用，
-            请使用 WAN/LAN 路由服务里的“独立 QoS”。
-          </n-alert>
           <n-alert type="info" :bordered="false">
-            只作用于 Landscape 转发的流量。本机、LAN-to-LAN 不进入 QoS。
-            当前仅支持单 WAN；多 LAN 会全部应用同一下行策略。
-            整形全部交给 qdisc，eBPF 只标记转发包，不做 token bucket 丢包。
-            HTB 精确但单队列；MQ 保留硬件多队列；IFB 实验模式。
-            数值单位 Mbps；0 表示不限制。
+            每个网口独立设置上传/下行；上传在本网口 egress 整形，下行通过 ingress
+            redirect 到 ifb-网口 再整形。和 TCX/传统 TC 无关，快速路径流量同样经过
+            qdisc。
           </n-alert>
 
-          <n-form label-placement="left" label-width="130">
-            <n-form-item label="全局上行 Mbps">
+          <n-form label-placement="left" label-width="150" :disabled="loading">
+            <n-form-item
+              v-for="edit in iface_edits"
+              :key="edit.name"
+              :label="`${edit.name}（${edit.zone.toUpperCase()}）`"
+            >
+              <n-switch v-model:value="edit.enabled" />
+              <n-text depth="3" style="margin-left: 12px">上行</n-text>
               <n-input-number
-                v-model:value="upload_mbps"
+                v-model:value="edit.upload_mbps"
                 :min="0"
                 :max="100000"
                 :step="10"
-                style="width: 180px"
+                :disabled="!edit.enabled"
+                style="width: 110px; margin-left: 6px"
               />
-            </n-form-item>
-            <n-form-item label="全局下行 Mbps">
+              <n-text depth="3" style="margin-left: 12px">下行</n-text>
               <n-input-number
-                v-model:value="download_mbps"
+                v-model:value="edit.download_mbps"
                 :min="0"
                 :max="100000"
                 :step="10"
-                style="width: 180px"
+                :disabled="!edit.enabled"
+                style="width: 110px; margin-left: 6px"
               />
-            </n-form-item>
-            <n-form-item label="队列模式">
-              <n-select
-                v-model:value="mode"
-                :options="[
-                  { label: 'HTB 单队列（精确）', value: 'htb' },
-                  { label: 'MQ 多队列（保留硬件队列）', value: 'mq' },
-                  { label: 'IFB 全局（实验）', value: 'ifb' },
-                ]"
-                style="width: 280px"
-              />
-            </n-form-item>
-            <n-form-item label="队列算法">
-              <n-select
-                v-model:value="qdisc"
-                :options="[
-                  { label: 'CAKE（推荐）', value: 'cake' },
-                  { label: 'fq_codel（仅公平队列）', value: 'fq_codel' },
-                ]"
-                style="width: 280px"
-              />
+              <n-text depth="3" style="margin-left: 6px">Mbps</n-text>
             </n-form-item>
           </n-form>
         </n-flex>
@@ -132,12 +136,7 @@ async function save() {
       <template #footer>
         <n-flex justify="end" :size="12">
           <n-button @click="show_model = false">取消</n-button>
-          <n-button
-            type="primary"
-            :loading="saving"
-            :disabled="tcx_mode === 'tc'"
-            @click="save"
-          >
+          <n-button type="primary" :loading="saving" @click="save">
             保存 QoS
           </n-button>
         </n-flex>

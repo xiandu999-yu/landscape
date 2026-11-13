@@ -2,7 +2,6 @@
 import { onMounted, ref } from "vue";
 import { useMessage } from "naive-ui";
 
-import ForkQosModal from "@/views/config_parts/ForkQosModal.vue";
 import {
   get_fork_config,
   update_fork_config,
@@ -12,7 +11,6 @@ import {
 const message = useMessage();
 const loading = ref(false);
 const saving = ref(false);
-const show_qos = ref(false);
 const config = ref<ForkConfig>({
   qos_enabled: false,
   fastpath_monitor: true,
@@ -62,24 +60,6 @@ onMounted(load);
         </n-alert>
 
         <n-form label-placement="left" label-width="180">
-          <n-form-item label="QoS 转发限速">
-            <n-switch v-model:value="config.qos_enabled" />
-            <n-button
-              size="small"
-              ghost
-              type="primary"
-              style="margin-left: 12px"
-              @click="show_qos = true"
-            >
-              QoS 配置
-            </n-button>
-            <n-text depth="3" style="margin-left: 10px">
-              仅作用于 Landscape 转发流；本机和 LAN-to-LAN 不进入 QoS
-            </n-text>
-            <n-text depth="3" style="margin-left: 10px">
-              仅支持单 WAN；多 LAN 会全部应用同一下行策略
-            </n-text>
-          </n-form-item>
           <n-form-item label="快速路径监控">
             <n-switch v-model:value="config.fastpath_monitor" />
             <n-text depth="3" style="margin-left: 10px">
@@ -96,6 +76,5 @@ onMounted(load);
       </n-flex>
     </n-spin>
 
-    <ForkQosModal v-model:show="show_qos" @saved="load" />
   </n-card>
 </template>

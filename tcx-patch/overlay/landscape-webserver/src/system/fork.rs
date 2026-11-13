@@ -178,11 +178,7 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
     } else {
         landscape_ebpf::tcx::current_mode()
     };
-    if effective_tcx == landscape_ebpf::tcx::Mode::Off && config.qos_enabled {
-        return Err(DbError::Internal(
-            "global QoS requires TCX; use per-interface QoS in TC mode".to_string(),
-        ));
-    }
+    let _ = effective_tcx;
     Ok(())
 }
 
@@ -218,21 +214,6 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         bridges
     };
 
-    // Scope rule: any WAN on TCX -> one global policy. Only when every WAN
-    // is legacy TC do the per-interface rules take over.
-    let any_tcx = if wan_configs.is_empty() {
-        match config.tcx_mode.as_str() {
-            "tc" => false,
-            "tcx" => true,
-            _ => landscape_ebpf::tcx::current_mode() != landscape_ebpf::tcx::Mode::Off,
-        }
-    } else {
-        wan_configs.iter().any(|iface| {
-            landscape_ebpf::tcx::ifindex_of_name(&iface.name)
-                .is_some_and(landscape_ebpf::tcx::wants_tcx)
-        })
-    };
-
     let rule_for = |name: &str| config.iface_qos.iter().find(|r| r.name == name);
     for iface in &lan_configs {
         if !targets.iter().any(|target| target == &iface.name) {
@@ -240,77 +221,23 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         }
     }
 
-    if any_tcx {
-        // Global mode ignores per-interface rules.
-        if !config.qos_enabled {
-            for iface in &wans {
-                super::qos_shaper::clear_iface(iface);
-            }
-            for iface in &targets {
-                super::qos_shaper::clear_iface(iface);
-            }
-            return;
-        }
-
-        for iface in &wans {
-            if let Err(error) = super::qos_shaper::apply_iface(
+    // SQM-style per-interface policy is independent of TC/TCX.
+    let mut sqm_ifaces = wans.clone();
+    sqm_ifaces.extend(targets.iter().cloned());
+    sqm_ifaces.sort();
+    sqm_ifaces.dedup();
+    for iface in &sqm_ifaces {
+        let rule = rule_for(iface).filter(|rule| rule.enabled);
+        let upload = rule.map(|rule| rule.upload_kbit).unwrap_or(0);
+        let download = rule.map(|rule| rule.download_kbit).unwrap_or(0);
+        if upload > 0 || download > 0 {
+            if let Err(error) = super::qos_shaper::apply_sqm(
                 iface,
-                config.qos_upload_kbit,
-                "upload",
+                upload,
+                download,
                 &config.qos_qdisc,
-                &config.qos_mode,
             ) {
-                tracing::warn!(%iface, %error, "qos shaper: upload failed");
-            }
-        }
-        for iface in &targets {
-            if let Err(error) = super::qos_shaper::apply_iface(
-                iface,
-                config.qos_download_kbit,
-                "download",
-                &config.qos_qdisc,
-                &config.qos_mode,
-            ) {
-                tracing::warn!(%iface, %error, "qos shaper: download failed");
-            }
-        }
-        return;
-    }
-
-    // All WAN are legacy TC: independent per-interface policy only.
-    for iface in &wans {
-        let rate = rule_for(iface)
-            .filter(|rule| rule.enabled)
-            .map(|rule| rule.upload_kbit)
-            .unwrap_or(0);
-        if rate > 0 {
-            if let Err(error) = super::qos_shaper::apply_iface(
-                iface,
-                rate,
-                "upload",
-                &config.qos_qdisc,
-                &config.qos_mode,
-            ) {
-                tracing::warn!(%iface, %error, "iface qos: upload failed");
-            }
-        } else {
-            super::qos_shaper::clear_iface(iface);
-        }
-    }
-    for iface in &targets {
-        let rate = rule_for(iface)
-            .filter(|rule| rule.enabled)
-            .map(|rule| rule.download_kbit)
-            .unwrap_or(0);
-        if rate > 0 {
-            if let Err(error) = super::qos_shaper::apply_iface(
-                iface,
-                rate,
-                "download",
-                &config.qos_qdisc,
-                &config.qos_mode,
-            ) {
-                tracing::warn!(%iface, %error, "iface qos: download failed");
+                tracing::warn!(%iface, %error, "sqm: apply failed");
             }
         } else {
             super::qos_shaper::clear_iface(iface);
@@ -348,6 +275,72 @@ pub async fn get_iface_qos() -> LandscapeApiResult<Vec<IfaceQosRule>> {
     LandscapeApiResp::success(read_config().iface_qos)
 }
 
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct QosTarget {
+    pub name: String,
+    pub zone: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct QosScope {
+    pub global: bool,
+}
+
+#[utoipa::path(
+    get,
+    path = "/fork/qos-scope",
+    tag = "System Config",
+    operation_id = "get_qos_scope",
+    responses((status = 200, description = "Success", body = QosScope))
+)]
+pub async fn get_qos_scope(State(app): State<LandscapeApp>) -> LandscapeApiResult<QosScope> {
+    LandscapeApiResp::success(QosScope { global: any_wan_tcx(&app).await })
+}
+
+#[utoipa::path(
+    get,
+    path = "/fork/qos-targets",
+    tag = "System Config",
+    operation_id = "get_qos_targets",
+    responses((status = 200, description = "Success", body = Vec<QosTarget>))
+)]
+pub async fn get_qos_targets(
+    State(app): State<LandscapeApp>,
+) -> LandscapeApiResult<Vec<QosTarget>> {
+    let mut out = Vec::new();
+    for iface in app.iface_config_service.get_all_wan_iface_config().await {
+        out.push(QosTarget {
+            name: iface.name,
+            zone: "wan".to_string(),
+        });
+    }
+    let lan = app
+        .iface_config_service
+        .list()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|iface| iface.zone_type == IfaceZoneType::Lan)
+        .collect::<Vec<_>>();
+    let bridges = lan
+        .iter()
+        .filter(|iface| iface.create_dev_type == CreateDevType::Bridge)
+        .map(|iface| iface.name.clone())
+        .collect::<Vec<_>>();
+    let targets: Vec<String> = if bridges.is_empty() {
+        lan.iter().map(|iface| iface.name.clone()).collect()
+    } else {
+        bridges
+    };
+    for name in targets {
+        out.push(QosTarget {
+            name,
+            zone: "lan".to_string(),
+        });
+    }
+    LandscapeApiResp::success(out)
+}
+
 #[utoipa::path(
     put,
     path = "/fork/iface-qos",
@@ -368,7 +361,9 @@ pub async fn update_iface_qos(
         return Err(DbError::Internal("iface QoS rate too large".to_string()).into());
     }
     let config = read_config();
-    let _ = &config;
+    if landscape_ebpf::tcx::ifindex_of_name(&name).is_none() {
+        return Err(DbError::Internal(format!("unknown interface: {name}")).into());
+    }
 
     let mut next = config.clone();
     next.iface_qos.retain(|r| r.name != name);
@@ -434,13 +429,6 @@ pub async fn update_fork_config(
     State(app): State<LandscapeApp>,
     JsonBody(config): JsonBody<ForkConfig>,
 ) -> LandscapeApiResult<()> {
-    if config.qos_enabled && !any_wan_tcx(&app).await {
-        return Err(DbError::Internal(
-            "global QoS requires at least one WAN on TCX; use per-interface QoS when all WAN are TC"
-                .to_string(),
-        )
-        .into());
-    }
     validate(&config)?;
     write_config(&config)
         .map_err(|error| DbError::Internal(format!("write fork.json: {error}")))?;

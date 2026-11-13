@@ -204,6 +204,47 @@ fn apply_ifb(
     Ok(())
 }
 
+fn apply_ingress_redirect(iface: &str, ifb: &str) -> Result<(), String> {
+    tc(&[
+        "qdisc", "replace", "dev", iface, "handle", "ffff:", "ingress",
+    ])?;
+    tc(&[
+        "filter", "replace", "dev", iface, "parent", "ffff:", "protocol", "all", "prio", "1",
+        "u32", "match", "u32", "0", "0", "action", "mirred", "egress", "redirect", "dev", ifb,
+    ])
+}
+
+/// SQM-style per-interface shaping: upload on the interface egress, download
+/// on an IFB fed by the interface ingress redirect.
+pub fn apply_sqm(
+    iface: &str,
+    upload_kbit: u32,
+    download_kbit: u32,
+    qdisc: &str,
+) -> Result<(), String> {
+    if iface.is_empty() {
+        return Ok(());
+    }
+
+    if upload_kbit > 0 {
+        apply_htb(iface, upload_kbit, "upload", qdisc)?;
+    } else {
+        let _ = tc(&["qdisc", "del", "dev", iface, "root"]);
+    }
+
+    if download_kbit > 0 {
+        let ifb = ensure_ifb(iface)?;
+        apply_ingress_redirect(iface, &ifb)?;
+        apply_htb(&ifb, download_kbit, "download", qdisc)?;
+        tracing::info!(%iface, %ifb, download_kbit, "sqm download applied");
+    } else {
+        let _ = tc(&["qdisc", "del", "dev", iface, "ingress"]);
+        let ifb = ifb_name(iface);
+        let _ = tc(&["qdisc", "del", "dev", ifb.as_str(), "root"]);
+    }
+    Ok(())
+}
+
 pub fn apply_iface(
     iface: &str,
     rate_kbit: u32,
@@ -238,6 +279,7 @@ pub fn clear_iface(iface: &str) {
         return;
     }
     let _ = tc(&["qdisc", "del", "dev", iface, "root"]);
+    let _ = tc(&["qdisc", "del", "dev", iface, "ingress"]);
     let ifb = ifb_name(iface);
     let _ = tc(&["qdisc", "del", "dev", ifb.as_str(), "root"]);
 }

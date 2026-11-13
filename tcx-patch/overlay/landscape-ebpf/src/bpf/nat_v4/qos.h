@@ -48,11 +48,8 @@ struct {
 } qos_bucket SEC(".maps");
 
 static __always_inline int qos_check(struct __sk_buff *skb, __u32 dir, __u32 len) {
-    __u32 cfg_key = 0;
-    struct qos_forward_cfg *cfg = bpf_map_lookup_elem(&qos_forward_cfg, &cfg_key);
-    if (!cfg || !cfg->enabled) return TC_ACT_OK;
-
-    /* Mark this as a forwarded packet for the HTB default/1:10 classes.
+    /* Always mark forwarded packets, even when no global policy exists:
+     * SQM is per-interface and reads skb->priority for the HTB 1:10 class.
      * Shaping is done entirely by the qdisc; no eBPF policing here. */
     skb->priority = QOS_CLASS_PRIORITY;
     (void)dir;
