@@ -2017,6 +2017,23 @@ def main() -> None:
         "    /* Neighbour changed on this interface: invalidate only its records. */\n"
         "    flow_core_ver_bump(ifindex);\n",
     )
+    # A neighbour that leaves VALID (INCOMPLETE/DELAY/PROBE/FAILED) must not
+    # leave its old MAC in ip_mac_v4/v6.  Otherwise fast path keeps sending to
+    # a stale MAC and never triggers ARP again.
+    patch(
+        "landscape-ebpf/src/bpf/neigh_update.bpf.c",
+        "        } else if (new_state == NUD_FAILED) {\n"
+        "            bpf_map_delete_elem(&ip_mac_v4, &key);\n",
+        "        } else if (!(new_state & NUD_VALID)) {\n"
+        "            bpf_map_delete_elem(&ip_mac_v4, &key);\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/neigh_update.bpf.c",
+        "        } else if (new_state == NUD_FAILED) {\n"
+        "            bpf_map_delete_elem(&ip_mac_v6, &key);\n",
+        "        } else if (!(new_state & NUD_VALID)) {\n"
+        "            bpf_map_delete_elem(&ip_mac_v6, &key);\n",
+    )
     patch(
         "landscape-ebpf/src/maps/nat/init.rs",
         'pub(crate) const FLOW_CORE_PIN: &str = "flow_core";\n',
