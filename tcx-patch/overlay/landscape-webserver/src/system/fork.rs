@@ -411,14 +411,6 @@ pub fn apply_saved(root: &Path) {
     }
 }
 
-#[utoipa::path(
-    put,
-    path = "/fork/config",
-    tag = "System Config",
-    operation_id = "update_fork_config",
-    request_body = ForkConfig,
-    responses((status = 200, description = "Success"))
-)]
 async fn any_wan_tcx(app: &LandscapeApp) -> bool {
     app.iface_config_service
         .get_all_wan_iface_config()
@@ -430,6 +422,14 @@ async fn any_wan_tcx(app: &LandscapeApp) -> bool {
         })
 }
 
+#[utoipa::path(
+    put,
+    path = "/fork/config",
+    tag = "System Config",
+    operation_id = "update_fork_config",
+    request_body = ForkConfig,
+    responses((status = 200, description = "Success"))
+)]
 pub async fn update_fork_config(
     State(app): State<LandscapeApp>,
     JsonBody(config): JsonBody<ForkConfig>,
