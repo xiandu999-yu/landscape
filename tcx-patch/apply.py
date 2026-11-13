@@ -2260,7 +2260,8 @@ def main() -> None:
         "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n"
         "        .routes(routes!(super::fork::get_fork_config, super::fork::update_fork_config))\n"
         "        .routes(routes!(super::fork::get_iface_qos, super::fork::update_iface_qos))\n"
-        "        .routes(routes!(super::fork::get_qos_targets, super::fork::get_qos_scope))\n"
+        "        .routes(routes!(super::fork::get_qos_targets))\n"
+        "        .routes(routes!(super::fork::get_qos_scope))\n"
         "        .routes(routes!(super::fastpath::get_fastpath_stats))\n",
     )
     patch(
