@@ -36,9 +36,9 @@ pub struct DnsUpstreamConfig {
     #[cfg_attr(feature = "openapi", schema(required = false, nullable = true))]
     pub use_experimental_pool: Option<bool>,
 
-    /// Source-address binding for connections to this upstream (optional).
+    /// Source-address binding and pool tuning for this upstream.
     #[serde(default)]
-    #[cfg_attr(feature = "openapi", schema(required = false))]
+    #[cfg_attr(feature = "openapi", schema(required = true))]
     pub bind_config: DnsBindConfig,
 
     #[serde(default = "get_f64_timestamp")]

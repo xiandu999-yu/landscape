@@ -47,14 +47,14 @@ async function enter() {
       enable_ip_validation: false,
       use_experimental_pool: false,
       bind_config: {
-        bind_addr4: null,
-        bind_addr6: null,
-        min_conns: null,
-        max_conns: null,
-        idle_timeout_secs: null,
-        connect_timeout_ms: null,
-        attempts: null,
-        max_fanout: null,
+        bind_addr4: undefined,
+        bind_addr6: undefined,
+        min_conns: undefined,
+        max_conns: undefined,
+        idle_timeout_secs: undefined,
+        connect_timeout_ms: undefined,
+        attempts: undefined,
+        max_fanout: undefined,
       },
     };
   }
