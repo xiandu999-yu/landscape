@@ -1,0 +1,454 @@
+name: build-tcx
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Upstream landscape ref to patch"
+        required: true
+        default: "v0.28.1"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            host: ubuntu-24.04
+          - arch: aarch64
+            host: ubuntu-24.04-arm
+    runs-on: ${{ matrix.host }}
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Show patch repo layout
+        run: |
+          set -euo pipefail
+          echo "---- files under patch/ ----"
+          find patch -maxdepth 4 -type f -not -path 'patch/.git/*' | sort | sed 's/^/  /'
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            echo "expected layout: tcx-patch/apply.py + tcx-patch/overlay/..."
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-ebpf/src/tcx.rs || {
+            echo "::error::src/landscape-ebpf/src/tcx.rs missing (overlay not copied)"
+            exit 1
+          }
+          grep -q 'attached TC hook via TCX' src/landscape-ebpf/src/landscape.rs || {
+            echo "::error::landscape.rs was not overlaid with the TCX-aware TcHookProxy"
+            exit 1
+          }
+          grep -q 'pub mod tcx;' src/landscape-ebpf/src/lib.rs || {
+            echo "::error::lib.rs was not patched with 'pub mod tcx;'"
+            exit 1
+          }
+          test -f src/landscape-ebpf/src/bpf/nat_v4/nat4_proto.h || {
+            echo "::error::nat4_proto.h missing"
+            exit 1
+          }
+          grep -q 'napt_is_nonport_protocol' src/landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h || {
+            echo "::error::NAT non-port protocol support missing"
+            exit 1
+          }
+          grep -q 'nat_wan_stats' src/landscape-ebpf/src/bpf/nat_v4/flow_core_map.h || {
+            echo "::error::per-CPU nat_wan_stats map missing"
+            exit 1
+          }
+          grep -q 'MapType::PercpuArray' src/landscape-ebpf/src/maps/nat/init.rs || {
+            echo "::error::nat_wan_stats map is not per-CPU"
+            exit 1
+          }
+          grep -q 'BPF_MAP_TYPE_PERCPU_ARRAY' src/landscape-ebpf/src/bpf/nat_v4/nat_fast.h || {
+            echo "::error::fa4_stats map is not per-CPU"
+            exit 1
+          }
+          test -f src/landscape-webserver/src/system/fork.rs || {
+            echo "::error::fork.rs missing"
+            exit 1
+          }
+          test -f src/landscape-webserver/src/system/fastpath.rs || {
+            echo "::error::fastpath.rs missing"
+            exit 1
+          }
+          test -f src/landscape-webui/src/views/metric/FastPathMetric.vue || {
+            echo "::error::FastPathMetric.vue missing"
+            exit 1
+          }
+          test -f src/landscape-webui/src/views/config_parts/ForkQosModal.vue || {
+            echo "::error::ForkQosModal.vue missing"
+            exit 1
+          }
+          grep -q 'pub mod fastpath_stats;' src/landscape-ebpf/src/lib.rs || {
+            echo "::error::fastpath_stats module not registered"
+            exit 1
+          }
+
+
+      - name: Show overlay changes
+        run: |
+          set -euo pipefail
+          git -C src status --short
+          git -C src diff --stat
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: tcx-${{ matrix.arch }}-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            tcx-${{ matrix.arch }}-${{ inputs.baseline }}-
+
+      - name: Build landscape-webserver and redirect_pkg_handler
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --features metric-persistent
+          cargo build --locked --release -p landscape-ebpf --bin redirect_pkg_handler
+          mkdir -p ../out
+          cp target/release/landscape-webserver "../out/landscape-webserver-${{ matrix.arch }}-tcx"
+          cp target/release/redirect_pkg_handler "../out/redirect_pkg_handler-${{ matrix.arch }}-tcx"
+          ls -l ../out
+
+      - name: Smoke test (non-root checks only)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ../out/landscape-webserver-${{ matrix.arch }}-tcx --version || true
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-tcx-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # musl static build (OpenWrt / any musl distro). Cross-compiled from the
+  # x86_64 runner with cargo-zigbuild + Alpine sysroot, mirroring upstream's
+  # scripts/build_musl_static.sh.
+  # ---------------------------------------------------------------------------
+  musl:
+    name: musl ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-ebpf/src/tcx.rs
+          grep -q 'attached TC hook via TCX' src/landscape-ebpf/src/landscape.rs
+          grep -q 'pub mod tcx;' src/landscape-ebpf/src/lib.rs
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+          targets: ${{ matrix.target }}
+
+      - name: Install zig and cargo-zigbuild
+        env:
+          ZIG_VERSION: "0.16.0"
+        run: |
+          set -euo pipefail
+
+          # IMPORTANT: the PyPI `ziglang` wheel does NOT install a `zig` entry
+          # point on PATH — the compiler is bundled at site-packages/ziglang/zig
+          # (that is why `zig version` returned 127 after a successful install).
+          python3 -m pip install --user "ziglang==${ZIG_VERSION}" ||
+            python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
+          export PATH="$HOME/.local/bin:${PATH}"
+
+          ZIG_BIN="$(python3 -c 'import os, ziglang; p = os.path.join(os.path.dirname(ziglang.__file__), "zig"); print(p if os.path.isfile(p) else "")')"
+          if [ -n "${ZIG_BIN}" ]; then
+            echo "zig binary: ${ZIG_BIN}"
+            sudo ln -sf "${ZIG_BIN}" /usr/local/bin/zig
+          else
+            echo "no bundled zig binary; installing python -m ziglang wrapper"
+            printf '#!/usr/bin/env bash\nexec python3 -m ziglang "$@"\n' | sudo tee /usr/local/bin/zig >/dev/null
+            sudo chmod +x /usr/local/bin/zig
+          fi
+
+          command -v zig
+          zig version
+          cargo install --locked cargo-zigbuild
+          command -v cargo-zigbuild
+          # NOTE: `cargo zigbuild --version` is parsed by the subcommand, which
+          # only accepts `--verbose`; verify the dispatch with --help instead.
+          cargo zigbuild --help >/dev/null
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+            ~/sysroots
+          key: tcx-musl-${{ matrix.target }}-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            tcx-musl-${{ matrix.target }}-${{ inputs.baseline }}-
+
+      - name: Build static musl binaries
+        working-directory: src
+        env:
+          GATEWAY: "1"
+          STATIC: "1"
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:${PATH}"
+          ./scripts/build_musl_static.sh ${{ matrix.target }}
+          ls -l output
+
+      - name: Verify binaries are statically linked
+        working-directory: src
+        run: |
+          set -euo pipefail
+          for f in output/landscape-webserver-${{ matrix.arch }}-static \
+                   output/redirect_pkg_handler-${{ matrix.arch }}-static; do
+            echo "== $f"
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+            file "$f"
+            if readelf -d "$f" 2>/dev/null | grep -q NEEDED; then
+              echo "::error::$f is dynamically linked"
+              readelf -d "$f" | head -n 20
+              exit 1
+            fi
+          done
+
+      - name: Upload static artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-tcx-musl-${{ matrix.arch }}
+          path: |
+            src/output/landscape-webserver-${{ matrix.arch }}-static
+            src/output/redirect_pkg_handler-${{ matrix.arch }}-static
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # WebUI static assets (Vue). The TCX overlay patches the Vue sources too, so
+  # this job MUST apply the overlay before building — otherwise the resulting
+  # bundle has no TCX editor (the historical bug that shipped a vanilla UI).
+  # ---------------------------------------------------------------------------
+  webui:
+    name: webui static
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout patch repo
+        uses: actions/checkout@v6
+        with:
+          path: patch
+
+      - name: Checkout upstream ${{ inputs.baseline }}
+        uses: actions/checkout@v6
+        with:
+          repository: ThisSeanZhang/landscape
+          ref: ${{ inputs.baseline }}
+          path: src
+
+      - name: Apply TCX overlay
+        run: |
+          set -euo pipefail
+          APPLY="$(find patch -type f -name apply.py -path '*tcx-patch*' | head -n 1)"
+          if [ -z "${APPLY}" ]; then
+            echo "::error::apply.py not found under $GITHUB_WORKSPACE/patch"
+            exit 1
+          fi
+          echo "using ${APPLY}"
+          python3 "${APPLY}" src
+
+      - name: Verify webui overlay landed
+        run: |
+          set -euo pipefail
+          test -f src/landscape-webui/src/components/tcx/TcxOrderSection.vue || {
+            echo "::error::TcxOrderSection.vue missing"; exit 1; }
+          test -f src/landscape-webui/src/api/tcx_order.ts || {
+            echo "::error::tcx_order.ts missing"; exit 1; }
+          grep -q 'TcxOrderSection' src/landscape-webui/src/components/route/wan/RouteWanServiceEditModal.vue || {
+            echo "::error::WAN modal was not patched"; exit 1; }
+          grep -q 'TcxOrderSection' src/landscape-webui/src/components/route/lan/RouteLanServiceEditModal.vue || {
+            echo "::error::LAN modal was not patched"; exit 1; }
+          grep -q 'tcx_order' src/landscape-webserver/src/system/config.rs || {
+            echo "::error::backend routes not patched"; exit 1; }
+          grep -q 'tcp_syn_timeout_secs' src/landscape-webui/src/components/nat/NATEditModal.vue || {
+            echo "::error::NAT modal timeout inputs not patched"; exit 1; }
+          grep -q 'nat_options' src/landscape-webui/src/components/nat/NATEditModal.vue || {
+            echo "::error::NAT modal nat_options wiring missing"; exit 1; }
+
+      - name: Install build toolchain
+        working-directory: src
+        run: ./scripts/setup_ubuntu_build.sh
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/target
+          key: webui-${{ inputs.baseline }}-${{ hashFiles('src/Cargo.lock') }}
+          restore-keys: |
+            webui-${{ inputs.baseline }}-
+
+      - name: Setup Node and pnpm
+        run: |
+          set -euo pipefail
+          node --version
+          npm install -g pnpm@12.6.0
+          pnpm --version
+
+      - name: Install JS dependencies
+        working-directory: src
+        run: pnpm install --frozen-lockfile
+
+      - name: Export OpenAPI and generate TS bindings
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo test -p landscape-webserver export_openapi_json -- --nocapture
+          pnpm --filter @landscape-router/types generate
+
+      - name: Build webui
+        working-directory: src
+        run: pnpm --filter landscape-webui build
+
+      - name: Verify TCX editor is in the bundle
+        working-directory: src
+        run: |
+          set -euo pipefail
+          if ! grep -Rql "tcx/order" landscape-webui/dist; then
+            echo "::error::the built bundle has no 'tcx/order' call — the TCX editor was not compiled in"
+            echo "---- dist assets ----"
+            find landscape-webui/dist -type f | head -n 20
+            exit 1
+          fi
+          if ! grep -Rql "tcp_syn_timeout_secs" landscape-webui/dist; then
+            echo "::error::the built bundle has no NAT timeout inputs (nat_options) — NAT modal not patched"
+            exit 1
+          fi
+          echo "TCX editor present in:"
+          grep -Rl "tcx/order" landscape-webui/dist | head -n 5
+          echo "NAT options present in:"
+          grep -Rl "tcp_syn_timeout_secs" landscape-webui/dist | head -n 5
+
+      - name: Package static assets
+        working-directory: src
+        run: |
+          set -euo pipefail
+          rm -rf output/static
+          mkdir -p output/static/scalar
+          cp -r landscape-webui/dist/. output/static/
+
+          # pnpm does NOT hoist @scalar/api-reference to the workspace root
+          # node_modules; it lives in landscape-webui/node_modules (symlinked
+          # into the pnpm store). Resolve it through the package symlink.
+          SCALAR_PKG="$(readlink -f landscape-webui/node_modules/@scalar/api-reference 2>/dev/null || true)"
+          if [ -z "${SCALAR_PKG}" ] || [ ! -d "${SCALAR_PKG}/dist" ]; then
+            echo "::warning::@scalar/api-reference not found; API reference assets skipped (main UI is unaffected)"
+          else
+            SCALAR_JS="$(find "${SCALAR_PKG}/dist" -maxdepth 3 -name 'standalone.js' | head -n 1 || true)"
+            SCALAR_CSS="$(find "${SCALAR_PKG}/dist" -maxdepth 2 -name 'style.css' | head -n 1 || true)"
+            if [ -n "${SCALAR_JS}" ]; then
+              cp "${SCALAR_JS}" output/static/scalar/standalone.js
+            else
+              echo "::warning::scalar standalone.js not found under ${SCALAR_PKG}/dist"
+            fi
+            if [ -n "${SCALAR_CSS}" ]; then
+              cp "${SCALAR_CSS}" output/static/scalar/style.css
+            else
+              echo "::warning::scalar style.css not found under ${SCALAR_PKG}/dist"
+            fi
+          fi
+
+          ( cd output && zip -qr ../landscape-webui-static.zip static )
+          ls -lh landscape-webui-static.zip
+          find output/static -maxdepth 2 -type f | head -n 20
+
+      - name: Upload webui static
+        uses: actions/upload-artifact@v7
+        with:
+          name: landscape-webui-static
+          path: src/landscape-webui-static.zip
+          if-no-files-found: error
