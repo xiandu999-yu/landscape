@@ -5,6 +5,7 @@ export interface TcxIfaceRule {
   name: string;
   ingress: string;
   egress: string;
+  mode?: string;
 }
 
 export interface TcxOrderResponse {

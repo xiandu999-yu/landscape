@@ -168,14 +168,19 @@ def main() -> None:
     import_line = (
         'import ConfigModal from "@/components/common/ConfigModal.vue";\n'
         'import TcxOrderSection from "@/components/tcx/TcxOrderSection.vue";\n'
+        'import IfaceQosSection from "@/components/qos/IfaceQosSection.vue";\n'
     )
     footer_anchor = "    <template #footer>"
-    for modal, egress in ((wan_modal, "true"), (lan_modal, "false")):
+    for modal, egress, qos_direction in (
+        (wan_modal, "true", "upload"),
+        (lan_modal, "false", "download"),
+    ):
         patch(modal, import_anchor, import_line)
         patch(
             modal,
             footer_anchor,
-            f'    <TcxOrderSection :iface_name="iface_info.iface_name" :egress="{egress}" />\n\n'
+            f'    <TcxOrderSection :iface_name="iface_info.iface_name" :egress="{egress}" />\n'
+            f'    <IfaceQosSection :iface_name="iface_info.iface_name" direction="{qos_direction}" />\n\n'
             f"{footer_anchor}",
         )
 
@@ -2259,6 +2264,7 @@ def main() -> None:
         "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n",
         "        .routes(routes!(super::nat_options::get_nat_options, super::nat_options::update_nat_options))\n"
         "        .routes(routes!(super::fork::get_fork_config, super::fork::update_fork_config))\n"
+        "        .routes(routes!(super::fork::get_iface_qos, super::fork::update_iface_qos))\n"
         "        .routes(routes!(super::fastpath::get_fastpath_stats))\n",
     )
     patch(

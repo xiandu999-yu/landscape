@@ -39,6 +39,20 @@ pub struct ForkConfig {
     /// TCX attach mode: `auto`, `tcx` or `tc`.
     #[serde(default = "default_tcx_mode")]
     pub tcx_mode: String,
+    /// Per-interface overrides. Empty entries inherit the global policy.
+    #[serde(default)]
+    pub iface_qos: Vec<IfaceQosRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct IfaceQosRule {
+    pub name: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub upload_kbit: u32,
+    #[serde(default)]
+    pub download_kbit: u32,
 }
 
 fn default_true() -> bool {
@@ -64,6 +78,7 @@ impl Default for ForkConfig {
             qos_qdisc: default_qdisc(),
             qos_mode: default_mode(),
             tcx_mode: default_tcx_mode(),
+            iface_qos: Vec::new(),
         }
     }
 }
@@ -110,6 +125,12 @@ pub(crate) fn current_tcx_mode() -> String {
 pub(crate) fn set_tcx_mode(mode: &str) -> Result<(), DbError> {
     let mut config = read_config();
     config.tcx_mode = mode.to_string();
+    // Selecting legacy TC invalidates QoS. Disable it in the same save so the
+    // mode switch itself never fails with "QoS requires TCX".
+    if mode == "tc" && config.qos_enabled {
+        config.qos_enabled = false;
+        tracing::warn!("tcx mode changed to tc; global QoS disabled");
+    }
     validate(&config)?;
     write_config(&config)
         .map_err(|error| DbError::Internal(format!("write fork.json: {error}")))?;
@@ -141,29 +162,36 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
             config.tcx_mode
         )));
     }
+    for rule in &config.iface_qos {
+        if rule.name.trim().is_empty() {
+            return Err(DbError::Internal("iface QoS name is empty".to_string()));
+        }
+        if rule.upload_kbit > 100_000_000 || rule.download_kbit > 100_000_000 {
+            return Err(DbError::Internal(format!(
+                "iface QoS rate too large: {}",
+                rule.name
+            )));
+        }
+    }
     let effective_tcx = if config.tcx_mode == "tc" {
         landscape_ebpf::tcx::Mode::Off
     } else {
         landscape_ebpf::tcx::current_mode()
     };
-    if config.qos_enabled && effective_tcx == landscape_ebpf::tcx::Mode::Off {
+    if effective_tcx == landscape_ebpf::tcx::Mode::Off && config.qos_enabled {
         return Err(DbError::Internal(
-            "QoS requires TCX; current mode is TC (legacy clsact). Change TCX 模式 to Auto or TCX first."
-                .to_string(),
+            "global QoS requires TCX; use per-interface QoS in TC mode".to_string(),
         ));
     }
     Ok(())
 }
 
 async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
-    // QoS is intentionally single-WAN: the first configured WAN is used.
-    let wan = app
+    let wan_configs = app
         .iface_config_service
         .get_all_wan_iface_config()
-        .await
-        .into_iter()
-        .next()
-        .map(|iface| iface.name);
+        .await;
+    let wans = wan_configs.iter().map(|iface| iface.name.clone()).collect::<Vec<_>>();
     let lan_configs = app
         .iface_config_service
         .list()
@@ -190,42 +218,102 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         bridges
     };
 
-    if !config.qos_enabled {
-        if let Some(iface) = wan.as_deref() {
-            super::qos_shaper::clear_iface(iface);
+    // Scope rule: any WAN on TCX -> one global policy. Only when every WAN
+    // is legacy TC do the per-interface rules take over.
+    let any_tcx = if wan_configs.is_empty() {
+        match config.tcx_mode.as_str() {
+            "tc" => false,
+            "tcx" => true,
+            _ => landscape_ebpf::tcx::current_mode() != landscape_ebpf::tcx::Mode::Off,
         }
-        for iface in &lan_configs {
-            super::qos_shaper::clear_iface(&iface.name);
-        }
-        return;
-    }
+    } else {
+        wan_configs.iter().any(|iface| {
+            landscape_ebpf::tcx::ifindex_of_name(&iface.name)
+                .is_some_and(landscape_ebpf::tcx::wants_tcx)
+        })
+    };
 
+    let rule_for = |name: &str| config.iface_qos.iter().find(|r| r.name == name);
     for iface in &lan_configs {
         if !targets.iter().any(|target| target == &iface.name) {
             super::qos_shaper::clear_iface(&iface.name);
         }
     }
 
-    if let Some(iface) = wan.as_deref() {
-        if let Err(error) = super::qos_shaper::apply_iface(
-            iface,
-            config.qos_upload_kbit,
-            "upload",
-            &config.qos_qdisc,
-            &config.qos_mode,
-        ) {
-            tracing::warn!(%iface, %error, "qos shaper: upload failed");
+    if any_tcx {
+        // Global mode ignores per-interface rules.
+        if !config.qos_enabled {
+            for iface in &wans {
+                super::qos_shaper::clear_iface(iface);
+            }
+            for iface in &targets {
+                super::qos_shaper::clear_iface(iface);
+            }
+            return;
+        }
+
+        for iface in &wans {
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                config.qos_upload_kbit,
+                "upload",
+                &config.qos_qdisc,
+                &config.qos_mode,
+            ) {
+                tracing::warn!(%iface, %error, "qos shaper: upload failed");
+            }
+        }
+        for iface in &targets {
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                config.qos_download_kbit,
+                "download",
+                &config.qos_qdisc,
+                &config.qos_mode,
+            ) {
+                tracing::warn!(%iface, %error, "qos shaper: download failed");
+            }
+        }
+        return;
+    }
+
+    // All WAN are legacy TC: independent per-interface policy only.
+    for iface in &wans {
+        let rate = rule_for(iface)
+            .filter(|rule| rule.enabled)
+            .map(|rule| rule.upload_kbit)
+            .unwrap_or(0);
+        if rate > 0 {
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                rate,
+                "upload",
+                &config.qos_qdisc,
+                &config.qos_mode,
+            ) {
+                tracing::warn!(%iface, %error, "iface qos: upload failed");
+            }
+        } else {
+            super::qos_shaper::clear_iface(iface);
         }
     }
     for iface in &targets {
-        if let Err(error) = super::qos_shaper::apply_iface(
-            iface,
-            config.qos_download_kbit,
-            "download",
-            &config.qos_qdisc,
-            &config.qos_mode,
-        ) {
-            tracing::warn!(%iface, %error, "qos shaper: download failed");
+        let rate = rule_for(iface)
+            .filter(|rule| rule.enabled)
+            .map(|rule| rule.download_kbit)
+            .unwrap_or(0);
+        if rate > 0 {
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                rate,
+                "download",
+                &config.qos_qdisc,
+                &config.qos_mode,
+            ) {
+                tracing::warn!(%iface, %error, "iface qos: download failed");
+            }
+        } else {
+            super::qos_shaper::clear_iface(iface);
         }
     }
 }
@@ -249,8 +337,59 @@ pub async fn get_fork_config() -> LandscapeApiResult<ForkConfig> {
     LandscapeApiResp::success(read_config())
 }
 
+#[utoipa::path(
+    get,
+    path = "/fork/iface-qos",
+    tag = "System Config",
+    operation_id = "get_iface_qos",
+    responses((status = 200, description = "Success", body = Vec<IfaceQosRule>))
+)]
+pub async fn get_iface_qos() -> LandscapeApiResult<Vec<IfaceQosRule>> {
+    LandscapeApiResp::success(read_config().iface_qos)
+}
+
+#[utoipa::path(
+    put,
+    path = "/fork/iface-qos",
+    tag = "System Config",
+    operation_id = "update_iface_qos",
+    request_body = IfaceQosRule,
+    responses((status = 200, description = "Success"))
+)]
+pub async fn update_iface_qos(
+    State(app): State<LandscapeApp>,
+    JsonBody(rule): JsonBody<IfaceQosRule>,
+) -> LandscapeApiResult<()> {
+    let name = rule.name.trim().to_string();
+    if name.is_empty() {
+        return Err(DbError::Internal("iface QoS name is empty".to_string()).into());
+    }
+    if rule.upload_kbit > 100_000_000 || rule.download_kbit > 100_000_000 {
+        return Err(DbError::Internal("iface QoS rate too large".to_string()).into());
+    }
+    let config = read_config();
+    let _ = &config;
+
+    let mut next = config.clone();
+    next.iface_qos.retain(|r| r.name != name);
+    if rule.enabled || rule.upload_kbit > 0 || rule.download_kbit > 0 {
+        next.iface_qos.push(IfaceQosRule { name, ..rule });
+    }
+    validate(&next)?;
+    write_config(&next)
+        .map_err(|error| DbError::Internal(format!("write fork.json: {error}")))?;
+    apply_shaper(&app, &next).await;
+    LandscapeApiResp::success(())
+}
+
 /// Re-apply the saved qdiscs after the interface services have started.
 pub async fn restore_shaper(app: &LandscapeApp) {
+    let config = read_config();
+    apply_shaper(app, &config).await;
+}
+
+/// Re-read fork.json and re-apply qdiscs (used after TCX mode changes).
+pub async fn refresh_shaper(app: &LandscapeApp) {
     let config = read_config();
     apply_shaper(app, &config).await;
 }
@@ -260,6 +399,7 @@ pub async fn restore_shaper(app: &LandscapeApp) {
 pub async fn clear_shaper(app: &LandscapeApp) {
     let mut config = read_config();
     config.qos_enabled = false;
+    config.iface_qos.clear();
     apply_shaper(app, &config).await;
 }
 
@@ -279,10 +419,28 @@ pub fn apply_saved(root: &Path) {
     request_body = ForkConfig,
     responses((status = 200, description = "Success"))
 )]
+async fn any_wan_tcx(app: &LandscapeApp) -> bool {
+    app.iface_config_service
+        .get_all_wan_iface_config()
+        .await
+        .iter()
+        .any(|iface| {
+            landscape_ebpf::tcx::ifindex_of_name(&iface.name)
+                .is_some_and(landscape_ebpf::tcx::wants_tcx)
+        })
+}
+
 pub async fn update_fork_config(
     State(app): State<LandscapeApp>,
     JsonBody(config): JsonBody<ForkConfig>,
 ) -> LandscapeApiResult<()> {
+    if config.qos_enabled && !any_wan_tcx(&app).await {
+        return Err(DbError::Internal(
+            "global QoS requires at least one WAN on TCX; use per-interface QoS when all WAN are TC"
+                .to_string(),
+        )
+        .into());
+    }
     validate(&config)?;
     write_config(&config)
         .map_err(|error| DbError::Internal(format!("write fork.json: {error}")))?;

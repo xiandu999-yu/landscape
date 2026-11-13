@@ -21,6 +21,7 @@ const config = ref<ForkConfig>({
   qos_qdisc: "cake",
   qos_mode: "htb",
   tcx_mode: "auto",
+  iface_qos: [],
 });
 
 async function load() {

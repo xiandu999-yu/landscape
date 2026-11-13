@@ -56,6 +56,7 @@ pub struct IfaceRule {
     pub ifindex: i32,
     pub egress: bool,
     pub order: Order,
+    pub mode: Option<Mode>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,7 +145,7 @@ fn parse_iface_rules(spec: &str) -> Vec<IfaceRule> {
             tracing::warn!(entry, "tcx iface rule ignored: unknown interface");
             continue;
         };
-        out.push(IfaceRule { ifindex, egress, order });
+        out.push(IfaceRule { ifindex, egress, order, mode: None });
     }
     out
 }
@@ -172,10 +173,14 @@ fn load_rules_file() -> Vec<IfaceRule> {
             tracing::warn!(name, "tcx rules file: unknown interface; ignored");
             continue;
         };
+        let mode = item
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .and_then(mode_from_str);
         for (key, egress) in [("ingress", false), ("egress", true)] {
             let Some(spec) = item.get(key).and_then(|v| v.as_str()) else { continue };
             if let Some(order) = parse_order(spec) {
-                out.push(IfaceRule { ifindex, egress, order });
+                out.push(IfaceRule { ifindex, egress, order, mode });
             } else {
                 tracing::warn!(name, key, spec, "tcx rules file: bad order; ignored");
             }
@@ -323,6 +328,31 @@ pub fn order_for(ifindex: i32, egress: bool) -> Order {
         .find(|r| r.ifindex == ifindex && r.egress == egress)
         .map(|r| r.order.clone())
         .unwrap_or(cfg.order)
+}
+
+/// Effective per-interface attach mode: an explicit per-interface mode wins
+/// over the global `fork.json` default.
+pub fn mode_for(ifindex: i32) -> Mode {
+    let cfg = config();
+    cfg.iface_rules
+        .iter()
+        .find(|r| r.ifindex == ifindex)
+        .and_then(|r| r.mode)
+        .unwrap_or(cfg.mode)
+}
+
+/// Whether this interface will actually use TCX (with Auto resolved by the
+/// kernel capability check).
+pub fn wants_tcx(ifindex: i32) -> bool {
+    match mode_for(ifindex) {
+        Mode::Off => false,
+        Mode::Require => true,
+        Mode::Auto => kernel_supports_tcx(),
+    }
+}
+
+pub fn ifindex_of_name(name: &str) -> Option<i32> {
+    ifindex_of(name)
 }
 
 /// Re-read env + rules file (called by the WebUI after it rewrites the rules

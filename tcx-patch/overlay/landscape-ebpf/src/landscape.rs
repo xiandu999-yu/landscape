@@ -63,7 +63,8 @@ impl TcHookProxy {
         let cfg = tcx::config();
         let egress = attach == libbpf_rs::TC_EGRESS;
 
-        let want_tcx = match cfg.mode {
+        let iface_mode = tcx::mode_for(ifindex);
+        let want_tcx = match iface_mode {
             tcx::Mode::Off => false,
             tcx::Mode::Auto => tcx::kernel_supports_tcx(),
             tcx::Mode::Require => true,
@@ -82,7 +83,7 @@ impl TcHookProxy {
                     return Self { clsact: None, tcx: Some(link) };
                 }
                 Err(err) => {
-                    if cfg.strict || cfg.mode == tcx::Mode::Require {
+                    if cfg.strict || iface_mode == tcx::Mode::Require {
                         panic!("TCX attach failed (ifindex={ifindex}, egress={egress}): {err}");
                     }
                     tracing::warn!(

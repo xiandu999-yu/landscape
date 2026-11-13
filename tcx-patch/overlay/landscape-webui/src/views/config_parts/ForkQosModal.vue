@@ -74,8 +74,8 @@ async function save() {
       <n-spin :show="loading">
         <n-flex vertical>
           <n-alert v-if="tcx_mode === 'tc'" type="warning" :bordered="false">
-            TCX 模式当前是 TC（传统 clsact）。QoS 依赖 TCX，TC 模式下无法启用，
-            请先在“路由转发服务 -> TCX 模式”改为 Auto 或 TCX。
+            TCX 模式当前是 TC（传统 clsact）。全局 QoS 不可用，
+            请使用 WAN/LAN 路由服务里的“独立 QoS”。
           </n-alert>
           <n-alert type="info" :bordered="false">
             只作用于 Landscape 转发的流量。本机、LAN-to-LAN 不进入 QoS。

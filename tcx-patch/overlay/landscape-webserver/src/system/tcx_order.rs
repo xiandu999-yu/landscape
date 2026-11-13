@@ -3,11 +3,13 @@
 use std::io::Write;
 use std::path::PathBuf;
 
+use axum::extract::State;
 use landscape_common::database::error::DbError;
 use serde::{Deserialize, Serialize};
 
 use crate::api::{JsonBody, LandscapeApiResp};
 use crate::error::LandscapeApiResult;
+use crate::LandscapeApp;
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TcxIfaceRule {
@@ -16,6 +18,9 @@ pub struct TcxIfaceRule {
     pub ingress: String,
     #[serde(default)]
     pub egress: String,
+    /// Per-interface mode: `auto` | `tcx` | `tc`; empty inherits fork.json.
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
@@ -163,6 +168,7 @@ pub async fn get_tcx_order() -> LandscapeApiResult<TcxOrderResponse> {
     responses((status = 200, description = "Success"))
 )]
 pub async fn update_tcx_order(
+    State(app): State<LandscapeApp>,
     JsonBody(req): JsonBody<UpdateTcxOrderRequest>,
 ) -> LandscapeApiResult<()> {
     let known = list_ifaces();
@@ -180,12 +186,19 @@ pub async fn update_tcx_order(
         if ingress.is_empty() && egress.is_empty() {
             continue;
         }
-        rules.push(TcxIfaceRule { name, ingress, egress });
+        let rule_mode = rule
+            .mode
+            .as_deref()
+            .map(normalize_mode)
+            .transpose()?;
+        rules.push(TcxIfaceRule { name, ingress, egress, mode: rule_mode });
     }
 
     let mode = normalize_mode(&req.mode)?;
     write_file(&RulesFile { ifaces: rules })
         .map_err(|e| DbError::Internal(format!("write tcx-order.json: {e}")))?;
     crate::system::fork::set_tcx_mode(&mode)?;
+    // Re-evaluate scope: any TCX -> global QoS; all TC -> independent QoS.
+    crate::system::fork::refresh_shaper(&app).await;
     LandscapeApiResp::success(())
 }

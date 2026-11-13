@@ -78,8 +78,8 @@ async function load() {
   try {
     const resp = await get_tcx_order();
     global_order.value = resp.global_order;
-    tcx_mode.value = resp.mode ?? "auto";
     const rule = resp.rules.find((r) => r.name === props.iface_name);
+    tcx_mode.value = rule?.mode ?? resp.mode ?? "auto";
     const [im, ip, iprog] = parse_spec(rule?.ingress);
     ingress_mode.value = im;
     ingress_pos.value = ip;
@@ -111,7 +111,7 @@ async function save() {
       ? compose_spec(egress_mode.value, egress_pos.value, egress_prog.value)
       : "";
     if (ingress !== "" || egress !== "") {
-      rules.push({ name: props.iface_name, ingress, egress });
+      rules.push({ name: props.iface_name, ingress, egress, mode: tcx_mode.value });
     }
     await update_tcx_order(rules, tcx_mode.value);
     message.success(
