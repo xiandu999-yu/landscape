@@ -2012,10 +2012,20 @@ def main() -> None:
     )
     patch(
         "landscape-ebpf/src/bpf/neigh_update.bpf.c",
-        "    u16 family = BPF_CORE_READ(n, ops, family);\n",
-        "    u16 family = BPF_CORE_READ(n, ops, family);\n"
-        "    /* Neighbour changed on this interface: invalidate only its records. */\n"
-        "    flow_core_ver_bump(ifindex);\n",
+        "    u8 old_state = BPF_CORE_READ(n, nud_state);\n",
+        "    u8 old_state = BPF_CORE_READ(n, nud_state);\n"
+        "    __u8 old_valid = old_state & NUD_VALID;\n"
+        "    __u8 new_valid = new_state & NUD_VALID;\n"
+        "    if (old_valid != new_valid) {\n"
+        "        flow_core_ver_bump(ifindex);\n"
+        "    } else if (new_valid && new_lladdr) {\n"
+        "        u8 old_mac[6];\n"
+        "        bpf_probe_read_kernel(old_mac, 6, n->ha);\n"
+        "        if (old_mac[0] != new_lladdr[0] || old_mac[1] != new_lladdr[1] ||\n"
+        "            old_mac[2] != new_lladdr[2] || old_mac[3] != new_lladdr[3] ||\n"
+        "            old_mac[4] != new_lladdr[4] || old_mac[5] != new_lladdr[5])\n"
+        "            flow_core_ver_bump(ifindex);\n"
+        "    }\n",
     )
     # A neighbour that leaves VALID (INCOMPLETE/DELAY/PROBE/FAILED) must not
     # leave its old MAC in ip_mac_v4/v6.  Otherwise fast path keeps sending to
