@@ -445,14 +445,9 @@ pub async fn clear_shaper(app: &LandscapeApp) {
 /// Re-apply the saved forwarding rates after the eBPF maps are pinned.
 pub fn apply_saved(root: &Path) {
     let config = read_config();
-    let keep_ifb: Vec<String> = config
-        .iface_qos
-        .iter()
-        .filter(|rule| rule.enabled && rule.download_kbit > 0)
-        .map(|rule| super::qos_shaper::ifb_name(&rule.name))
-        .collect();
-    super::qos_shaper::cleanup_ifb(&keep_ifb);
-    super::qos_shaper::cleanup_legacy_netkit();
+    // A reboot can leave ifb-* devices without their qdiscs. Drop all of
+    // them here; restore_shaper() recreates only the ones still configured.
+    super::qos_shaper::cleanup_ifb(&[]);
     if let Err(error) = landscape_ebpf::qos_runtime::update(root, runtime(&config)) {
         tracing::warn!(%error, "qos: restore saved policy failed");
     }

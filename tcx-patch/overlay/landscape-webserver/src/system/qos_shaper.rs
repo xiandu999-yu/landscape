@@ -313,21 +313,4 @@ pub fn cleanup_ifb(keep: &[String]) {
     }
 }
 
-/// Older SOCKS5 builds created a netkit device named `landscape`. The current
-/// tree has no netkit code; remove the leftover device if it is still netkit.
-pub fn cleanup_legacy_netkit() {
-    let Ok(output) = Command::new("ip")
-        .args(["-d", "link", "show", "landscape"])
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let details = String::from_utf8_lossy(&output.stdout);
-    if details.contains("netkit") {
-        let _ = ip(&["link", "del", "landscape"]);
-        tracing::info!("removed legacy netkit device landscape");
-    }
-}
+

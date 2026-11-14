@@ -2503,6 +2503,12 @@ def main() -> None:
     # The shaper is applied when QoS settings are saved.
     patch(
         "landscape-webserver/src/main.rs",
+        "    landscape_common::utils::sysctl::init_sysctl_setting();\n",
+        "    crate::system::fork::restore_shaper(&landscape_app_status).await;\n"
+        "    landscape_common::utils::sysctl::init_sysctl_setting();\n",
+    )
+    patch(
+        "landscape-webserver/src/main.rs",
         "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
         "    crate::system::fork::clear_shaper(&landscape_app_status).await;\n"
         "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
