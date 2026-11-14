@@ -18,6 +18,8 @@ const saving = ref(false);
 const enabled = ref(false);
 const upload_mbps = ref(0);
 const download_mbps = ref(0);
+const qdisc = ref<"cake" | "fq_codel">("cake");
+const mode = ref<"htb" | "mq" | "ifb">("htb");
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -31,6 +33,8 @@ async function load() {
     enabled.value = rule?.enabled ?? false;
     upload_mbps.value = to_mbps(rule?.upload_kbit ?? 0);
     download_mbps.value = to_mbps(rule?.download_kbit ?? 0);
+    qdisc.value = rule?.qdisc === "fq_codel" ? "fq_codel" : "cake";
+    mode.value = rule?.mode === "mq" || rule?.mode === "ifb" ? rule.mode : "htb";
   } catch (error) {
     console.error("load iface qos failed", error);
     message.error("读取网口 QoS 失败");
@@ -47,6 +51,8 @@ async function save() {
       enabled: enabled.value,
       upload_kbit: Math.max(0, Math.round(upload_mbps.value * 1000)),
       download_kbit: Math.max(0, Math.round(download_mbps.value * 1000)),
+      qdisc: qdisc.value,
+      mode: mode.value,
     };
     await update_iface_qos(rule);
     message.success("网口 QoS 已保存");
@@ -100,6 +106,32 @@ onUnmounted(() => {
           :disabled="!enabled"
           style="width: 180px"
         />
+      </n-form-item>
+      <n-form-item label="队列模式">
+        <n-select
+          v-model:value="mode"
+          :options="[
+            { label: 'HTB 单队列', value: 'htb' },
+            { label: 'MQ 多队列（保留硬件队列）', value: 'mq' },
+            { label: 'IFB 重定向（实验）', value: 'ifb' },
+          ]"
+          :disabled="!enabled"
+          style="width: 260px"
+        />
+      </n-form-item>
+      <n-form-item label="队列规则">
+        <n-select
+          v-model:value="qdisc"
+          :options="[
+            { label: 'CAKE（推荐，nat + ecn）', value: 'cake' },
+            { label: 'fq_codel（公平队列）', value: 'fq_codel' },
+          ]"
+          :disabled="!enabled"
+          style="width: 260px"
+        />
+        <n-text depth="3" style="margin-left: 10px">
+          CAKE 使用 diffserv4 + triple-isolate + nat + ecn；失败自动回退 fq_codel
+        </n-text>
       </n-form-item>
       <n-alert type="info" :bordered="false">
         上行在网口 egress 整形；下行通过 ingress redirect 到 ifb-网口 再整形

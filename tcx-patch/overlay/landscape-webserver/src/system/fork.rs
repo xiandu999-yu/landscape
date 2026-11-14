@@ -53,6 +53,12 @@ pub struct IfaceQosRule {
     pub upload_kbit: u32,
     #[serde(default)]
     pub download_kbit: u32,
+    /// Leaf qdisc: `cake` or `fq_codel`.
+    #[serde(default = "default_qdisc")]
+    pub qdisc: String,
+    /// Upload root mode: `htb`, `mq` or `ifb`.
+    #[serde(default = "default_mode")]
+    pub mode: String,
 }
 
 fn default_true() -> bool {
@@ -172,6 +178,18 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
                 rule.name
             )));
         }
+        if rule.qdisc != "cake" && rule.qdisc != "fq_codel" {
+            return Err(DbError::Internal(format!(
+                "unsupported iface qdisc: {}",
+                rule.qdisc
+            )));
+        }
+        if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "ifb" {
+            return Err(DbError::Internal(format!(
+                "unsupported iface queue mode: {}",
+                rule.mode
+            )));
+        }
     }
     let effective_tcx = if config.tcx_mode == "tc" {
         landscape_ebpf::tcx::Mode::Off
@@ -230,13 +248,12 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         let rule = rule_for(iface).filter(|rule| rule.enabled);
         let upload = rule.map(|rule| rule.upload_kbit).unwrap_or(0);
         let download = rule.map(|rule| rule.download_kbit).unwrap_or(0);
+        let qdisc = rule.map(|rule| rule.qdisc.as_str()).unwrap_or(&config.qos_qdisc);
+        let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
         if upload > 0 || download > 0 {
-            if let Err(error) = super::qos_shaper::apply_sqm(
-                iface,
-                upload,
-                download,
-                &config.qos_qdisc,
-            ) {
+            if let Err(error) =
+                super::qos_shaper::apply_sqm(iface, upload, download, qdisc, mode)
+            {
                 tracing::warn!(%iface, %error, "sqm: apply failed");
             }
         } else {
@@ -363,6 +380,21 @@ pub async fn update_iface_qos(
     let config = read_config();
     if landscape_ebpf::tcx::ifindex_of_name(&name).is_none() {
         return Err(DbError::Internal(format!("unknown interface: {name}")).into());
+    }
+
+    if rule.qdisc != "cake" && rule.qdisc != "fq_codel" {
+        return Err(DbError::Internal(format!(
+            "unsupported iface qdisc: {}",
+            rule.qdisc
+        ))
+        .into());
+    }
+    if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "ifb" {
+        return Err(DbError::Internal(format!(
+            "unsupported iface queue mode: {}",
+            rule.mode
+        ))
+        .into());
     }
 
     let mut next = config.clone();

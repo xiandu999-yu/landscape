@@ -22,6 +22,8 @@ const iface_edits = ref<
       enabled: boolean;
       upload_mbps: number;
       download_mbps: number;
+      qdisc: "cake" | "fq_codel";
+      mode: "htb" | "mq" | "ifb";
     }
   >
 >([]);
@@ -47,6 +49,8 @@ async function load() {
         enabled: rule?.enabled ?? false,
         upload_mbps: to_mbps(rule?.upload_kbit ?? 0),
         download_mbps: to_mbps(rule?.download_kbit ?? 0),
+        qdisc: rule?.qdisc ?? "cake",
+        mode: rule?.mode ?? "htb",
       };
     });
   } catch (error) {
@@ -70,6 +74,8 @@ async function save() {
         enabled: edit.enabled,
         upload_kbit: Math.max(0, Math.round(edit.upload_mbps * 1000)),
         download_kbit: Math.max(0, Math.round(edit.download_mbps * 1000)),
+        qdisc: edit.qdisc,
+        mode: edit.mode,
       });
     }
     message.success("QoS 已保存");

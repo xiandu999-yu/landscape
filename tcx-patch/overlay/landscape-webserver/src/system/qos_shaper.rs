@@ -221,13 +221,25 @@ pub fn apply_sqm(
     upload_kbit: u32,
     download_kbit: u32,
     qdisc: &str,
+    mode: &str,
 ) -> Result<(), String> {
     if iface.is_empty() {
         return Ok(());
     }
 
     if upload_kbit > 0 {
-        apply_htb(iface, upload_kbit, "upload", qdisc)?;
+        // ifb mode uses the same ifb-<iface> device as the ingress path, so
+        // it cannot coexist with a download shape; fall back to htb then.
+        let upload_mode = if mode == "ifb" && download_kbit > 0 { "htb" } else { mode };
+        let result = match upload_mode {
+            "mq" => apply_mq(iface, upload_kbit, "upload", qdisc),
+            "ifb" => apply_ifb(iface, upload_kbit, "upload", qdisc),
+            _ => apply_htb(iface, upload_kbit, "upload", qdisc),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%iface, %error, "sqm upload mode failed, falling back to htb");
+            apply_htb(iface, upload_kbit, "upload", qdisc)?;
+        }
     } else {
         let _ = tc(&["qdisc", "del", "dev", iface, "root"]);
     }
