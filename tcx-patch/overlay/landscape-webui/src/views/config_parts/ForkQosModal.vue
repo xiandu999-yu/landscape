@@ -103,9 +103,8 @@ async function save() {
       <n-spin :show="loading">
         <n-flex vertical>
           <n-alert type="info" :bordered="false">
-            每个网口独立设置上传/下行；上传在本网口 egress 整形，下行通过 ingress
-            redirect 到 ifb-网口 再整形。和 TCX/传统 TC 无关，快速路径流量同样经过
-            qdisc。
+            每个网口独立设置上传/下行；上传在本网口 egress，下行在 LAN egress。
+            不再对 WAN ingress 做 IFB 重定向，避免影响入向快速路径。
           </n-alert>
 
           <n-form label-placement="left" label-width="150" :disabled="loading">

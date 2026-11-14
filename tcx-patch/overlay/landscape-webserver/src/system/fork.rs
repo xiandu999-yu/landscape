@@ -233,44 +233,40 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
     };
 
     let rule_for = |name: &str| config.iface_qos.iter().find(|r| r.name == name);
-    let keep_ifb: Vec<String> = config
-        .iface_qos
-        .iter()
-        .filter(|rule| {
-            rule.enabled
-                && rule.download_kbit > 0
-                && (wans.iter().any(|name| name == &rule.name)
-                    || targets.iter().any(|name| name == &rule.name))
-        })
-        .map(|rule| super::qos_shaper::ifb_name(&rule.name))
-        .collect();
-    super::qos_shaper::cleanup_ifb(&keep_ifb);
+    super::qos_shaper::cleanup_ifb(&[]);
     for iface in &lan_configs {
         if !targets.iter().any(|target| target == &iface.name) {
             super::qos_shaper::clear_iface(&iface.name);
         }
     }
 
-    // SQM-style per-interface policy is independent of TC/TCX.
-    let mut sqm_ifaces = wans.clone();
-    sqm_ifaces.extend(targets.iter().cloned());
-    sqm_ifaces.sort();
-    sqm_ifaces.dedup();
-    for iface in &sqm_ifaces {
+    // Upload is the primary shaping direction. Download is intentionally not
+    // shaped: the WAN ingress path stays clean for the TCX fast path.
+    for iface in &wans {
         let rule = rule_for(iface).filter(|rule| rule.enabled);
         let upload = rule.map(|rule| rule.upload_kbit).unwrap_or(0);
-        let download = rule.map(|rule| rule.download_kbit).unwrap_or(0);
         let qdisc = rule.map(|rule| rule.qdisc.as_str()).unwrap_or(&config.qos_qdisc);
         let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
-        if upload > 0 || download > 0 {
-            if let Err(error) =
-                super::qos_shaper::apply_sqm(iface, upload, download, qdisc, mode)
-            {
-                tracing::warn!(%iface, %error, "sqm: apply failed");
+        let mode = if mode == "mq" { "mq" } else { "htb" };
+        let _ = super::qos_shaper::clear_ingress(iface);
+        if upload > 0 {
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                upload,
+                "upload",
+                qdisc,
+                mode,
+            ) {
+                tracing::warn!(%iface, %error, "wan upload qos failed");
             }
         } else {
             super::qos_shaper::clear_iface(iface);
         }
+    }
+
+    for iface in &targets {
+        let _ = super::qos_shaper::clear_ingress(iface);
+        super::qos_shaper::clear_iface(iface);
     }
 }
 

@@ -367,11 +367,13 @@ const action_sections = computed(() => {
     label: t("topology.panel.action_cpu", { name: props.node.name }),
   });
 
-  sections.push({
-    key: "qos",
-    short_label: "QOS",
-    label: `QoS 配置（${props.node.name}）`,
-  });
+  if (props.node.zone_type === IfaceZoneType.wan) {
+    sections.push({
+      key: "qos",
+      short_label: "QOS",
+      label: `QoS 配置（${props.node.name}）`,
+    });
+  }
 
   if (props.node.dev_kind === "bridge" && props.node.name !== "docker0") {
     sections.push({

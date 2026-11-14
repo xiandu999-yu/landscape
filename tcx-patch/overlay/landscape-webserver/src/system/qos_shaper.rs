@@ -286,6 +286,10 @@ pub fn apply_iface(
     result
 }
 
+pub fn clear_ingress(iface: &str) -> Result<(), String> {
+    tc(&["qdisc", "del", "dev", iface, "ingress"])
+}
+
 pub fn clear_iface(iface: &str) {
     if iface.is_empty() {
         return;
