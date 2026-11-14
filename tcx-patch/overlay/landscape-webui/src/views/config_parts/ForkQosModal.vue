@@ -23,7 +23,7 @@ const iface_edits = ref<
       upload_mbps: number;
       download_mbps: number;
       qdisc: "cake" | "fq_codel";
-      mode: "htb" | "mq" | "ifb";
+      mode: "htb" | "mq";
     }
   >
 >([]);

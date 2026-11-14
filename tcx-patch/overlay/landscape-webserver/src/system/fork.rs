@@ -56,7 +56,7 @@ pub struct IfaceQosRule {
     /// Leaf qdisc: `cake` or `fq_codel`.
     #[serde(default = "default_qdisc")]
     pub qdisc: String,
-    /// Upload root mode: `htb`, `mq` or `ifb`.
+    /// Upload root mode: `htb` or `mq`.
     #[serde(default = "default_mode")]
     pub mode: String,
 }
@@ -184,7 +184,7 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
                 rule.qdisc
             )));
         }
-        if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "ifb" {
+        if rule.mode != "htb" && rule.mode != "mq" {
             return Err(DbError::Internal(format!(
                 "unsupported iface queue mode: {}",
                 rule.mode
@@ -389,7 +389,7 @@ pub async fn update_iface_qos(
         ))
         .into());
     }
-    if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "ifb" {
+    if rule.mode != "htb" && rule.mode != "mq" {
         return Err(DbError::Internal(format!(
             "unsupported iface queue mode: {}",
             rule.mode

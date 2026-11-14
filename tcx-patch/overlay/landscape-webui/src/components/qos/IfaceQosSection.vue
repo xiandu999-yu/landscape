@@ -19,7 +19,7 @@ const enabled = ref(false);
 const upload_mbps = ref(0);
 const download_mbps = ref(0);
 const qdisc = ref<"cake" | "fq_codel">("cake");
-const mode = ref<"htb" | "mq" | "ifb">("htb");
+const mode = ref<"htb" | "mq">("htb");
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -34,7 +34,7 @@ async function load() {
     upload_mbps.value = to_mbps(rule?.upload_kbit ?? 0);
     download_mbps.value = to_mbps(rule?.download_kbit ?? 0);
     qdisc.value = rule?.qdisc === "fq_codel" ? "fq_codel" : "cake";
-    mode.value = rule?.mode === "mq" || rule?.mode === "ifb" ? rule.mode : "htb";
+    mode.value = rule?.mode === "mq" ? "mq" : "htb";
   } catch (error) {
     console.error("load iface qos failed", error);
     message.error("读取网口 QoS 失败");
@@ -113,7 +113,6 @@ onUnmounted(() => {
           :options="[
             { label: 'HTB 单队列', value: 'htb' },
             { label: 'MQ 多队列（保留硬件队列）', value: 'mq' },
-            { label: 'IFB 重定向（实验）', value: 'ifb' },
           ]"
           :disabled="!enabled"
           style="width: 260px"
