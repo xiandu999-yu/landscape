@@ -264,9 +264,39 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         }
     }
 
+    let lan_download_fallback = config
+        .iface_qos
+        .iter()
+        .filter(|rule| {
+            rule.enabled
+                && rule.download_kbit > 0
+                && lan_configs.iter().any(|iface| iface.name == rule.name)
+        })
+        .map(|rule| rule.download_kbit)
+        .max()
+        .unwrap_or(0);
     for iface in &targets {
+        let rule = rule_for(iface).filter(|rule| rule.enabled);
+        let download = rule
+            .map(|rule| rule.download_kbit)
+            .unwrap_or(lan_download_fallback);
+        let qdisc = rule.map(|rule| rule.qdisc.as_str()).unwrap_or(&config.qos_qdisc);
         let _ = super::qos_shaper::clear_ingress(iface);
-        super::qos_shaper::clear_iface(iface);
+        if download > 0 {
+            // HTB keeps only eBPF-marked forwarded packets in 1:10; LAN-to-LAN
+            // and router-local traffic stay in the unlimited 1:999 class.
+            if let Err(error) = super::qos_shaper::apply_iface(
+                iface,
+                download,
+                "download",
+                qdisc,
+                "htb",
+            ) {
+                tracing::warn!(%iface, %error, "lan download qos failed");
+            }
+        } else {
+            super::qos_shaper::clear_iface(iface);
+        }
     }
 }
 

@@ -367,7 +367,10 @@ const action_sections = computed(() => {
     label: t("topology.panel.action_cpu", { name: props.node.name }),
   });
 
-  if (props.node.zone_type === IfaceZoneType.wan) {
+  if (
+    props.node.zone_type === IfaceZoneType.wan ||
+    props.node.zone_type === IfaceZoneType.lan
+  ) {
     sections.push({
       key: "qos",
       short_label: "QOS",
@@ -923,7 +926,12 @@ async function handleDeleteBridge() {
         :bordered="false"
         size="small"
       >
-        <IfaceQosSection :iface_name="node.name" />
+        <IfaceQosSection
+          :iface_name="node.name"
+          :direction="
+            node.zone_type === IfaceZoneType.wan ? 'upload' : 'download'
+          "
+        />
       </n-card>
     </n-modal>
     <IfaceDisableGuardModal
