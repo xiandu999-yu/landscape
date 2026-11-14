@@ -7,7 +7,7 @@ export interface IfaceQosRule {
   upload_kbit: number;
   download_kbit: number;
   qdisc: "cake" | "fq_codel";
-  mode: "htb" | "mq";
+  mode: "htb" | "mq" | "cake";
 }
 
 export interface ForkConfig {
@@ -16,7 +16,7 @@ export interface ForkConfig {
   qos_upload_kbit: number;
   qos_download_kbit: number;
   qos_qdisc: "cake" | "fq_codel" | "cake_mq3" | "fq_codel_mq3";
-  qos_mode: "htb" | "mq";
+  qos_mode: "htb" | "mq" | "cake";
   tcx_mode: "auto" | "tcx" | "tc";
   iface_qos: IfaceQosRule[];
 }

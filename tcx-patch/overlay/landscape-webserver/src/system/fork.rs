@@ -56,7 +56,7 @@ pub struct IfaceQosRule {
     /// Leaf qdisc: `cake` or `fq_codel`.
     #[serde(default = "default_qdisc")]
     pub qdisc: String,
-    /// Upload root mode: `htb` or `mq`.
+    /// Upload root mode: `htb`, `mq` or `cake`.
     #[serde(default = "default_mode")]
     pub mode: String,
 }
@@ -184,7 +184,7 @@ fn validate(config: &ForkConfig) -> Result<(), DbError> {
                 rule.qdisc
             )));
         }
-        if rule.mode != "htb" && rule.mode != "mq" {
+        if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "cake" {
             return Err(DbError::Internal(format!(
                 "unsupported iface queue mode: {}",
                 rule.mode
@@ -249,8 +249,22 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
         let mode = if mode == "mq" { "mq" } else { "htb" };
         let _ = super::qos_shaper::clear_ingress(iface);
-        if mode == "mq" {
-            if let Err(error) = super::qos_shaper::apply_mq_aqm(iface, qdisc) {
+        if mode == "cake" {
+            let result = if upload > 0 {
+                super::qos_shaper::apply_root_rate(iface, upload, qdisc)
+            } else {
+                super::qos_shaper::apply_root_aqm(iface, qdisc)
+            };
+            if let Err(error) = result {
+                tracing::warn!(%iface, %error, "wan cake aqm failed");
+            }
+        } else if mode == "mq" {
+            let result = if upload > 0 {
+                super::qos_shaper::apply_iface(iface, upload, "upload", qdisc, "mq")
+            } else {
+                super::qos_shaper::apply_mq_aqm(iface, qdisc)
+            };
+            if let Err(error) = result {
                 tracing::warn!(%iface, %error, "wan mq aqm failed");
             }
         } else if upload > 0 {
@@ -287,12 +301,7 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         let qdisc = rule.map(|rule| rule.qdisc.as_str()).unwrap_or(&config.qos_qdisc);
         let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
         let _ = super::qos_shaper::clear_ingress(iface);
-        if mode == "mq" {
-            // Multi-queue means CAKE/AQM without a rate limit.
-            if let Err(error) = super::qos_shaper::apply_mq_aqm(iface, qdisc) {
-                tracing::warn!(%iface, %error, "lan mq aqm failed");
-            }
-        } else if download > 0 {
+        if download > 0 {
             // HTB keeps only eBPF-marked forwarded packets in 1:10; LAN-to-LAN
             // and router-local traffic stay in the unlimited 1:999 class.
             if let Err(error) = super::qos_shaper::apply_iface(
@@ -303,6 +312,14 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
                 "htb",
             ) {
                 tracing::warn!(%iface, %error, "lan download qos failed");
+            }
+        } else if mode == "cake" {
+            if let Err(error) = super::qos_shaper::apply_root_aqm(iface, qdisc) {
+                tracing::warn!(%iface, %error, "lan cake aqm failed");
+            }
+        } else if mode == "mq" {
+            if let Err(error) = super::qos_shaper::apply_mq_aqm(iface, qdisc) {
+                tracing::warn!(%iface, %error, "lan mq aqm failed");
             }
         } else {
             super::qos_shaper::clear_iface(iface);
@@ -426,7 +443,10 @@ pub async fn update_iface_qos(
         return Err(DbError::Internal("iface QoS rate too large".to_string()).into());
     }
     // A non-zero rate means rate limiting, which is HTB-only.
-    if (rule.upload_kbit > 0 || rule.download_kbit > 0) && rule.mode == "mq" {
+    // Download is LAN egress: a non-zero rate must be HTB so LAN-to-LAN and
+    // local traffic stay unlimited. WAN upload has no such traffic, so
+    // MQ/CAKE may keep their own rate handling.
+    if rule.download_kbit > 0 && rule.mode != "htb" {
         rule.mode = "htb".to_string();
     }
     let config = read_config();
@@ -441,7 +461,7 @@ pub async fn update_iface_qos(
         ))
         .into());
     }
-    if rule.mode != "htb" && rule.mode != "mq" {
+    if rule.mode != "htb" && rule.mode != "mq" && rule.mode != "cake" {
         return Err(DbError::Internal(format!(
             "unsupported iface queue mode: {}",
             rule.mode

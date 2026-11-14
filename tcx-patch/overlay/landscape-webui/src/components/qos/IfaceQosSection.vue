@@ -22,9 +22,9 @@ const saving = ref(false);
 const enabled = ref(false);
 const rate_mbps = ref(0);
 const qdisc = ref<"cake" | "fq_codel">("cake");
-const mode = ref<"htb" | "mq">("htb");
-const mode_locked = computed(() => rate_mbps.value > 0);
-watch(rate_mbps, (value) => { if (value > 0) mode.value = "htb"; });
+const mode = ref<"htb" | "mq" | "cake">("htb");
+const mode_locked = computed(() => props.direction === "download" && rate_mbps.value > 0);
+watch(rate_mbps, (value) => { if (props.direction === "download" && value > 0) mode.value = "htb"; });
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -40,7 +40,7 @@ async function load() {
       (props.direction === "upload" ? rule?.upload_kbit : rule?.download_kbit) ?? 0,
     );
     qdisc.value = rule?.qdisc === "fq_codel" ? "fq_codel" : "cake";
-    mode.value = rule?.mode === "mq" ? "mq" : "htb";
+    mode.value = rule?.mode === "mq" || rule?.mode === "cake" ? rule.mode : "htb";
   } catch (error) {
     console.error("load iface qos failed", error);
     message.error("读取网口 QoS 失败");
@@ -59,7 +59,8 @@ async function save() {
       upload_kbit: props.direction === "upload" ? rate : 0,
       download_kbit: props.direction === "download" ? rate : 0,
       qdisc: qdisc.value,
-      mode: rate > 0 ? "htb" : mode.value,
+      mode:
+        props.direction === "download" && rate > 0 ? "htb" : mode.value,
     };
     await update_iface_qos(rule);
     message.success("网口 QoS 已保存");
@@ -106,7 +107,7 @@ onUnmounted(() => {
         :min="0"
         :max="100000"
         :step="10"
-        :disabled="!enabled || mode === 'mq'"
+        :disabled="!enabled || (direction === 'download' && mode !== 'htb')"
         style="width: 180px"
       />
     </n-form-item>
@@ -114,14 +115,15 @@ onUnmounted(() => {
       <n-select
         v-model:value="mode"
         :options="[
-          { label: 'HTB 单队列', value: 'htb' },
-          { label: 'MQ / 单队列 CAKE（不限速）', value: 'mq' },
+          { label: 'HTB（限速，仅转发）', value: 'htb' },
+          { label: 'MQ（多队列 CAKE，不限速）', value: 'mq' },
+          { label: 'CAKE（单队列，不限速）', value: 'cake' },
         ]"
         :disabled="!enabled || mode_locked"
         style="width: 260px"
       />
       <n-text v-if="mode_locked" depth="3" style="margin-left: 10px">
-        速率 &gt; 0 时锁定 HTB；设为 0 后可自由选择 MQ
+        LAN 下行速率 &gt; 0 时锁定 HTB；设为 0 后可自由选择 MQ / CAKE
       </n-text>
     </n-form-item>
     <n-form-item label="队列规则">
@@ -140,12 +142,12 @@ onUnmounted(() => {
     </n-form-item>
     <n-alert type="info" :bordered="false">
       <template v-if="direction === 'upload'">
-        HTB：WAN egress 只对 eBPF 标记的转发包走 1:10，本机流量 1:999 不限速。
-        MQ：多队列时每队列挂 CAKE；单队列时直接 root CAKE，不建 mq、不限速。
+        WAN 不锁模式：HTB 只对转发包走 1:10；MQ 每队列 CAKE（可按速率分摊）；
+        CAKE 单队列 root CAKE（可带 bandwidth）。没有 LAN-to-LAN 需要排除。
       </template>
       <template v-else>
-        HTB：LAN egress 只对 WAN->LAN 转发包走 1:10，LAN-to-LAN 与本机流量 1:999。
-        MQ：多队列时每队列挂 CAKE；单队列时直接 root CAKE，不建 mq、不限速。
+        LAN 下行速率 > 0 锁 HTB：只对 WAN->LAN 转发包走 1:10，LAN-to-LAN 与本机流量 1:999。
+        速率 = 0 时可选 MQ（每队列 CAKE）或 CAKE（单队列 root CAKE），不限速。
       </template>
     </n-alert>
     <n-flex justify="end">

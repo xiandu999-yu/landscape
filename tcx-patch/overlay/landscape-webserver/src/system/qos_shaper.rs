@@ -168,6 +168,33 @@ fn apply_leaf_aqm(iface: &str, parent: &str, qdisc: &str, direction: &str) -> Re
     Ok(())
 }
 
+/// Root CAKE with a bandwidth limit (WAN upload has no LAN-to-LAN traffic to
+/// exclude, so shaping all egress is acceptable there).
+pub fn apply_root_rate(iface: &str, rate_kbit: u32, qdisc: &str) -> Result<(), String> {
+    if rate_kbit == 0 {
+        return apply_root_aqm(iface, qdisc);
+    }
+    if qdisc == "cake" {
+        let rate = format!("{rate_kbit}kbit");
+        let args = [
+            "qdisc", "replace", "dev", iface, "root", "cake", "bandwidth", rate.as_str(),
+            "diffserv4", "triple-isolate", "nat", "ecn",
+        ];
+        if tc(&args).is_ok() {
+            tracing::info!(%iface, %rate, "qos root cake rate applied");
+            return Ok(());
+        }
+        let no_nat = [
+            "qdisc", "replace", "dev", iface, "root", "cake", "bandwidth", rate.as_str(),
+            "diffserv4", "triple-isolate", "ecn",
+        ];
+        if tc(&no_nat).is_ok() {
+            return Ok(());
+        }
+    }
+    apply_htb(iface, rate_kbit, "upload", qdisc)
+}
+
 /// AQM-only single queue: CAKE/fq_codel directly on the root, no rate limit.
 pub fn apply_root_aqm(iface: &str, qdisc: &str) -> Result<(), String> {
     if qdisc == "cake" {
@@ -200,9 +227,6 @@ pub fn apply_root_aqm(iface: &str, qdisc: &str) -> Result<(), String> {
 /// A single-queue device gets a plain root CAKE instead of a pointless mq.
 pub fn apply_mq_aqm(iface: &str, qdisc: &str) -> Result<(), String> {
     let queues = tx_queue_count(iface);
-    if queues <= 1 {
-        return apply_root_aqm(iface, qdisc);
-    }
     replace_root_mq(iface)?;
     for index in 1..=queues {
         let parent = format!("1:{index}");
