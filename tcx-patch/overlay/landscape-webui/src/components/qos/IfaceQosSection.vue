@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useMessage } from "naive-ui";
 
 import {
@@ -23,6 +23,8 @@ const enabled = ref(false);
 const rate_mbps = ref(0);
 const qdisc = ref<"cake" | "fq_codel">("cake");
 const mode = ref<"htb" | "mq">("htb");
+const mode_locked = computed(() => rate_mbps.value > 0);
+watch(rate_mbps, (value) => { if (value > 0) mode.value = "htb"; });
 
 function to_mbps(kbit: number) {
   return Math.round((kbit ?? 0) / 1000);
@@ -57,7 +59,7 @@ async function save() {
       upload_kbit: props.direction === "upload" ? rate : 0,
       download_kbit: props.direction === "download" ? rate : 0,
       qdisc: qdisc.value,
-      mode: props.direction === "download" ? "htb" : mode.value,
+      mode: rate > 0 ? "htb" : mode.value,
     };
     await update_iface_qos(rule);
     message.success("网口 QoS 已保存");
@@ -104,20 +106,23 @@ onUnmounted(() => {
         :min="0"
         :max="100000"
         :step="10"
-        :disabled="!enabled"
+        :disabled="!enabled || mode === 'mq'"
         style="width: 180px"
       />
     </n-form-item>
-    <n-form-item v-if="direction === 'upload'" label="队列模式">
+    <n-form-item label="队列模式">
       <n-select
         v-model:value="mode"
         :options="[
           { label: 'HTB 单队列', value: 'htb' },
-          { label: 'MQ 多队列（保留硬件队列）', value: 'mq' },
+          { label: 'MQ / 单队列 CAKE（不限速）', value: 'mq' },
         ]"
-        :disabled="!enabled"
+        :disabled="!enabled || mode_locked"
         style="width: 260px"
       />
+      <n-text v-if="mode_locked" depth="3" style="margin-left: 10px">
+        速率 &gt; 0 时锁定 HTB；设为 0 后可自由选择 MQ
+      </n-text>
     </n-form-item>
     <n-form-item label="队列规则">
       <n-select
@@ -135,11 +140,12 @@ onUnmounted(() => {
     </n-form-item>
     <n-alert type="info" :bordered="false">
       <template v-if="direction === 'upload'">
-        WAN egress 只对 eBPF 标记的转发包走 1:10；本机流量走 1:999 不限速。
+        HTB：WAN egress 只对 eBPF 标记的转发包走 1:10，本机流量 1:999 不限速。
+        MQ：多队列时每队列挂 CAKE；单队列时直接 root CAKE，不建 mq、不限速。
       </template>
       <template v-else>
-        LAN egress 只对 WAN->LAN 转发包走 1:10；LAN-to-LAN 与本机流量走 1:999。
-        下载在 LAN 出口整形，不再对 WAN ingress 做 IFB。
+        HTB：LAN egress 只对 WAN->LAN 转发包走 1:10，LAN-to-LAN 与本机流量 1:999。
+        MQ：多队列时每队列挂 CAKE；单队列时直接 root CAKE，不建 mq、不限速。
       </template>
     </n-alert>
     <n-flex justify="end">

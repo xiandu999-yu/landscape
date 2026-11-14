@@ -249,13 +249,17 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
         let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
         let mode = if mode == "mq" { "mq" } else { "htb" };
         let _ = super::qos_shaper::clear_ingress(iface);
-        if upload > 0 {
+        if mode == "mq" {
+            if let Err(error) = super::qos_shaper::apply_mq_aqm(iface, qdisc) {
+                tracing::warn!(%iface, %error, "wan mq aqm failed");
+            }
+        } else if upload > 0 {
             if let Err(error) = super::qos_shaper::apply_iface(
                 iface,
                 upload,
                 "upload",
                 qdisc,
-                mode,
+                "htb",
             ) {
                 tracing::warn!(%iface, %error, "wan upload qos failed");
             }
@@ -281,8 +285,14 @@ async fn apply_shaper(app: &LandscapeApp, config: &ForkConfig) {
             .map(|rule| rule.download_kbit)
             .unwrap_or(lan_download_fallback);
         let qdisc = rule.map(|rule| rule.qdisc.as_str()).unwrap_or(&config.qos_qdisc);
+        let mode = rule.map(|rule| rule.mode.as_str()).unwrap_or("htb");
         let _ = super::qos_shaper::clear_ingress(iface);
-        if download > 0 {
+        if mode == "mq" {
+            // Multi-queue means CAKE/AQM without a rate limit.
+            if let Err(error) = super::qos_shaper::apply_mq_aqm(iface, qdisc) {
+                tracing::warn!(%iface, %error, "lan mq aqm failed");
+            }
+        } else if download > 0 {
             // HTB keeps only eBPF-marked forwarded packets in 1:10; LAN-to-LAN
             // and router-local traffic stay in the unlimited 1:999 class.
             if let Err(error) = super::qos_shaper::apply_iface(
@@ -406,7 +416,7 @@ pub async fn get_qos_targets(
 )]
 pub async fn update_iface_qos(
     State(app): State<LandscapeApp>,
-    JsonBody(rule): JsonBody<IfaceQosRule>,
+    JsonBody(mut rule): JsonBody<IfaceQosRule>,
 ) -> LandscapeApiResult<()> {
     let name = rule.name.trim().to_string();
     if name.is_empty() {
@@ -414,6 +424,10 @@ pub async fn update_iface_qos(
     }
     if rule.upload_kbit > 100_000_000 || rule.download_kbit > 100_000_000 {
         return Err(DbError::Internal("iface QoS rate too large".to_string()).into());
+    }
+    // A non-zero rate means rate limiting, which is HTB-only.
+    if (rule.upload_kbit > 0 || rule.download_kbit > 0) && rule.mode == "mq" {
+        rule.mode = "htb".to_string();
     }
     let config = read_config();
     if landscape_ebpf::tcx::ifindex_of_name(&name).is_none() {

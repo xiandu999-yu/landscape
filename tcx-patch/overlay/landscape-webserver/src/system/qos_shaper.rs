@@ -131,6 +131,87 @@ fn apply_leaf(
     Ok(())
 }
 
+fn apply_leaf_aqm(iface: &str, parent: &str, qdisc: &str, direction: &str) -> Result<(), String> {
+    let _ = tc(&["qdisc", "del", "dev", iface, "parent", parent]);
+
+    if qdisc == "cake" {
+        let args = [
+            "qdisc", "replace", "dev", iface, "parent", parent, "cake", "diffserv4",
+            "triple-isolate", "nat", "ecn",
+        ];
+        if tc(&args).is_ok() {
+            tracing::info!(%iface, %parent, %direction, "qos leaf aqm applied (cake nat ecn)");
+            return Ok(());
+        }
+        let no_nat = [
+            "qdisc", "replace", "dev", iface, "parent", parent, "cake", "diffserv4",
+            "triple-isolate", "ecn",
+        ];
+        if tc(&no_nat).is_ok() {
+            tracing::info!(%iface, %parent, %direction, "qos leaf aqm applied (cake ecn)");
+            return Ok(());
+        }
+    }
+
+    if tc(&[
+        "qdisc", "replace", "dev", iface, "parent", parent, "fq_codel", "ecn",
+    ])
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let _ = tc(&["qdisc", "del", "dev", iface, "parent", parent]);
+    tc(&[
+        "qdisc", "replace", "dev", iface, "parent", parent, "fq_codel",
+    ])?;
+    tracing::info!(%iface, %parent, %direction, "qos leaf aqm applied (fq_codel)");
+    Ok(())
+}
+
+/// AQM-only single queue: CAKE/fq_codel directly on the root, no rate limit.
+pub fn apply_root_aqm(iface: &str, qdisc: &str) -> Result<(), String> {
+    if qdisc == "cake" {
+        let args = [
+            "qdisc", "replace", "dev", iface, "root", "cake", "diffserv4", "triple-isolate",
+            "nat", "ecn",
+        ];
+        if tc(&args).is_ok() {
+            tracing::info!(%iface, "qos root cake aqm applied (no rate limit)");
+            return Ok(());
+        }
+        let no_nat = [
+            "qdisc", "replace", "dev", iface, "root", "cake", "diffserv4",
+            "triple-isolate", "ecn",
+        ];
+        if tc(&no_nat).is_ok() {
+            return Ok(());
+        }
+    }
+    if tc(&["qdisc", "replace", "dev", iface, "root", "fq_codel", "ecn"]).is_ok() {
+        return Ok(());
+    }
+    let _ = tc(&["qdisc", "del", "dev", iface, "root"]);
+    tc(&["qdisc", "replace", "dev", iface, "root", "fq_codel"])?;
+    tracing::info!(%iface, "qos root fq_codel aqm applied (no rate limit)");
+    Ok(())
+}
+
+/// CAKE/AQM-only multi-queue: one leaf per hardware TX queue, no rate limit.
+/// A single-queue device gets a plain root CAKE instead of a pointless mq.
+pub fn apply_mq_aqm(iface: &str, qdisc: &str) -> Result<(), String> {
+    let queues = tx_queue_count(iface);
+    if queues <= 1 {
+        return apply_root_aqm(iface, qdisc);
+    }
+    replace_root_mq(iface)?;
+    for index in 1..=queues {
+        let parent = format!("1:{index}");
+        apply_leaf_aqm(iface, parent.as_str(), qdisc, "aqm")?;
+    }
+    tracing::info!(%iface, queues, "qos mq aqm applied (no rate limit)");
+    Ok(())
+}
+
 fn apply_htb(
     iface: &str,
     rate_kbit: u32,
