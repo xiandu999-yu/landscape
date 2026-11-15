@@ -45,6 +45,20 @@ struct {
     __type(value, struct flow_wan_map_value);
 } napt_from_wan SEC(".maps");
 
+static __always_inline int flow_wan_mapping_exists(__u8 proto, __be16 ext_port) {
+    __u32 base;
+    if (proto == IPV4_PROTO_UDP)
+        base = LAND_NAPT_FROM_WAN_UDP_BASE;
+    else if (proto == IPV4_PROTO_TCP)
+        base = LAND_NAPT_FROM_WAN_TCP_BASE;
+    else
+        return 0;
+
+    __u32 idx = base + (__u32)bpf_ntohs(ext_port);
+    struct flow_wan_map_value *m = bpf_map_lookup_elem(&napt_from_wan, &idx);
+    return m && m->kind != 0;
+}
+
 static __always_inline int flow_wan_mapping_matches(__u8 proto, __be16 ext_port,
                                                     __be32 internal_addr,
                                                     __be16 internal_port) {

@@ -64,8 +64,6 @@ static __always_inline void flow_core_record_wan(__be32 remote_addr, __be16 remo
 
 /* Returns TC_ACT_REDIRECT when served from the core table, TC_ACT_OK otherwise. */
 static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off) {
-    flow_core_ctl_add(4);
-
     struct iphdr iph;
     if (bpf_skb_load_bytes(skb, l3_off, &iph, sizeof(iph)))
         return flow_core_ctl_set(7, FLOW_CORE_EXIT_HDR);
@@ -86,6 +84,12 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
     __be16 sport = ports[0];
     __be16 dport = ports[1];
 
+    /* Only packets with an external-port mapping are WAN->LAN forwarding.
+     * Router-local traffic has no mapping and must not pollute the fast-path
+     * hit-rate denominator. */
+    if (!flow_wan_mapping_exists(proto, dport)) return TC_ACT_OK;
+
+    flow_core_ctl_add(4);
     flow_core_ctl_add(5);
 
     struct flow_core_key key = {};
