@@ -230,7 +230,7 @@ jobs:
           set -euo pipefail
 
           # IMPORTANT: the PyPI `ziglang` wheel does NOT install a `zig` entry
-          # point on PATH — the compiler is bundled at site-packages/ziglang/zig
+          # point on PATH 鈥?the compiler is bundled at site-packages/ziglang/zig
           # (that is why `zig version` returned 127 after a successful install).
           python3 -m pip install --user "ziglang==${ZIG_VERSION}" ||
             python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
@@ -304,7 +304,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # WebUI static assets (Vue). The TCX overlay patches the Vue sources too, so
-  # this job MUST apply the overlay before building — otherwise the resulting
+  # this job MUST apply the overlay before building 鈥?otherwise the resulting
   # bundle has no TCX editor (the historical bug that shipped a vanilla UI).
   # ---------------------------------------------------------------------------
   webui:
@@ -399,13 +399,13 @@ jobs:
         run: |
           set -euo pipefail
           if ! grep -Rql "tcx/order" landscape-webui/dist; then
-            echo "::error::the built bundle has no 'tcx/order' call — the TCX editor was not compiled in"
+            echo "::error::the built bundle has no 'tcx/order' call 鈥?the TCX editor was not compiled in"
             echo "---- dist assets ----"
             find landscape-webui/dist -type f | head -n 20
             exit 1
           fi
           if ! grep -Rql "tcp_syn_timeout_secs" landscape-webui/dist; then
-            echo "::error::the built bundle has no NAT timeout inputs (nat_options) — NAT modal not patched"
+            echo "::error::the built bundle has no NAT timeout inputs (nat_options) 鈥?NAT modal not patched"
             exit 1
           fi
           echo "TCX editor present in:"
@@ -452,3 +452,4 @@ jobs:
           name: landscape-webui-static
           path: src/landscape-webui-static.zip
           if-no-files-found: error
+
