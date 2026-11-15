@@ -15,11 +15,16 @@
  * Kept apart from flow_core_tbl.h so the NAT object (which owns napt_from_wan
  * itself) can include just this header - including the full tbl header would
  * redefine napt_from_wan with a different type.
+ *
+ * One table is shared by TCP and UDP. TCP records have a 24h TTL, so a busy
+ * host can pin many entries; the table is sized for that (524288 entries).
+ * A future split into flow_core_tcp/flow_core_udp would need separate pins and
+ * skeleton wiring in the userspace path.
  */
 
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 32768);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 524288);
     __type(key, struct flow_core_key);
     __type(value, struct flow_core_value);
 } flow_core SEC(".maps");

@@ -81,7 +81,8 @@ static __always_inline int flow_core_take(struct __sk_buff *skb, __be16 *sport, 
  * the CT dies and a neighbour change bumps the generation, so the TTL is just a
  * safety net / memory reclamation trigger. */
 static __always_inline __u64 flow_core_ttl(__u8 proto, __be16 dport) {
-    if (proto == IPV4_PROTO_TCP) return 120ULL * 1000000000ULL;
+    /* TCP records can legitimately live for a whole day; UDP/QUIC are short. */
+    if (proto == IPV4_PROTO_TCP) return 24ULL * 3600ULL * 1000000000ULL;
     if (dport == bpf_htons(443)) return 60ULL * 1000000000ULL; /* QUIC */
     return 60ULL * 1000000000ULL;
 }

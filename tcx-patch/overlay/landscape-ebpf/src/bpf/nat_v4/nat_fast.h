@@ -80,8 +80,8 @@ static __always_inline void fa4_stat_inc(__u32 idx) {
 }
 
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 32768);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 262144);
     __type(key, struct nat_fast_key);
     __type(value, struct nat_fast_value);
 } fa4_fast SEC(".maps");
