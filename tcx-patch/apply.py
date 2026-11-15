@@ -1600,6 +1600,23 @@ def main() -> None:
         "const volatile u32 current_l3_offset = 14;\n"
         "const volatile __u8 land_nat_fast_ingress = 0;\n",
     )
+    # Bare-IP link layers (IPIP/GRE/raw IP) have no Ethernet header.  Keep
+    # them distinct from Tunnel/Tunnel6, which describe the device origin and
+    # may still carry Ethernet (e.g. gretap).
+    patch(
+        "landscape-common/src/dev/mod.rs",
+        "pub enum DeviceType {\n    UnSupport,\n    Loopback,\n",
+        "pub enum DeviceType {\n    UnSupport,\n    BareIp,\n    Loopback,\n",
+    )
+    patch(
+        "landscape/src/netlink/convert.rs",
+        "        netlink_packet_route::link::LinkLayerType::Tunnel6 => DeviceType::Tunnel6,\n",
+        "        netlink_packet_route::link::LinkLayerType::Tunnel6 => DeviceType::Tunnel6,\n"
+        "        netlink_packet_route::link::LinkLayerType::Rawip => DeviceType::BareIp,\n"
+        "        netlink_packet_route::link::LinkLayerType::Ipgre => DeviceType::BareIp,\n"
+        "        netlink_packet_route::link::LinkLayerType::Ip6gre => DeviceType::BareIp,\n",
+    )
+
     # 16) Ingress fast path plumbing: shared pinned flow_core + env gate.
     patch(
         "landscape-ebpf/src/lib.rs",
