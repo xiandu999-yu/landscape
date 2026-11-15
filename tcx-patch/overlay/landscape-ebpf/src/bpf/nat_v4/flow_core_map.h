@@ -16,10 +16,9 @@
  * itself) can include just this header - including the full tbl header would
  * redefine napt_from_wan with a different type.
  *
- * One table is shared by TCP and UDP. TCP records have a 24h TTL, so a busy
- * host can pin many entries; the table is sized for that (524288 entries).
- * A future split into flow_core_tcp/flow_core_udp would need separate pins and
- * skeleton wiring in the userspace path.
+ * A single LRU table is used for both TCP and UDP for now; TCP records have a
+ * 24h TTL, so the table is sized for that (524288 entries). Splitting into
+ * flow_core_tcp/flow_core_udp still needs separate pins and skeleton wiring.
  */
 
 struct {
@@ -28,6 +27,23 @@ struct {
     __type(key, struct flow_core_key);
     __type(value, struct flow_core_value);
 } flow_core SEC(".maps");
+
+static __always_inline struct flow_core_value *flow_core_lookup_elem(
+    __u8 proto, const struct flow_core_key *key) {
+    (void)proto;
+    return bpf_map_lookup_elem(&flow_core, key);
+}
+
+static __always_inline int flow_core_update_elem(__u8 proto, const struct flow_core_key *key,
+                                                 const struct flow_core_value *value) {
+    (void)proto;
+    return bpf_map_update_elem(&flow_core, key, value, BPF_ANY);
+}
+
+static __always_inline int flow_core_delete_elem(__u8 proto, const struct flow_core_key *key) {
+    (void)proto;
+    return bpf_map_delete_elem(&flow_core, key);
+}
 
 /* Control slots (global): [0]=ARP change counter [7]=last exit reason. */
 struct {

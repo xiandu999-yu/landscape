@@ -1938,7 +1938,7 @@ def main() -> None:
         "        fc_k.dport = fc_v->external_port;\n"
         "        fc_k.proto = key->proto;\n"
         "        fc_k.dir = FLOW_CORE_DIR_WAN2LAN;\n"
-        "        bpf_map_delete_elem(&flow_core, &fc_k);\n"
+        "        flow_core_delete_elem(key->proto, &fc_k);\n"
         "    }\n"
         "#endif\n"
         "    bpf_map_delete_elem(&napt_ct, key);\n",

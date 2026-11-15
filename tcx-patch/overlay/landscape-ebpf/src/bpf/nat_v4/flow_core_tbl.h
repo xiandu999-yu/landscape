@@ -45,7 +45,7 @@ static __always_inline void flow_core_record_wan(__be32 remote_addr, __be16 remo
     value.ver = (__u32)flow_core_ver_get(out_ifindex);
     value.state = FLOW_CORE_STATE_COMPLETE;
 
-    bpf_map_update_elem(&flow_core, &key, &value, BPF_ANY);
+    flow_core_update_elem(proto, &key, &value);
     flow_core_ctl_add(1);
 }
 
@@ -96,7 +96,7 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
     key.proto = proto;
     key.dir = FLOW_CORE_DIR_WAN2LAN;
 
-    struct flow_core_value *value = bpf_map_lookup_elem(&flow_core, &key);
+    struct flow_core_value *value = flow_core_lookup_elem(proto, &key);
     if (!value) {
         flow_core_ctl_add(6);
         return TC_ACT_OK;
@@ -104,18 +104,18 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
     /* Only a complete, current record may skip the chain. */
     if (value->state != FLOW_CORE_STATE_COMPLETE ||
         value->ver != (__u32)flow_core_ver_get(value->out_ifindex)) {
-        bpf_map_delete_elem(&flow_core, &key);
+        flow_core_delete_elem(proto, &key);
         return TC_ACT_OK;
     }
     if (bpf_ktime_get_ns() > value->deadline_ns) {
-        bpf_map_delete_elem(&flow_core, &key);
+        flow_core_delete_elem(proto, &key);
         flow_core_ctl_add(3);
         return TC_ACT_OK;
     }
     /* The mapping must still point at the same host (guards the case where a
      * CT disappeared without going through napt_ct_delete). */
     if (!flow_wan_mapping_matches(proto, dport, value->internal_addr, value->internal_port)) {
-        bpf_map_delete_elem(&flow_core, &key);
+        flow_core_delete_elem(proto, &key);
         return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAPPING);
     }
 
