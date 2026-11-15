@@ -142,6 +142,14 @@ jobs:
           restore-keys: |
             tcx-${{ matrix.arch }}-${{ inputs.baseline }}-
 
+      - name: Resolve upgraded dependency lock
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo update -p libbpf-sys --precise 1.7.1
+          cargo update -p netlink-packet-route --precise 0.34.0
+          cargo update -p rtnetlink --precise 0.24.0
+
       - name: Build landscape-webserver and redirect_pkg_handler
         working-directory: src
         run: |
@@ -266,6 +274,14 @@ jobs:
           restore-keys: |
             tcx-musl-${{ matrix.target }}-${{ inputs.baseline }}-
 
+      - name: Resolve upgraded dependency lock
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo update -p libbpf-sys --precise 1.7.1
+          cargo update -p netlink-packet-route --precise 0.34.0
+          cargo update -p rtnetlink --precise 0.24.0
+
       - name: Build static musl binaries
         working-directory: src
         env:
@@ -382,6 +398,14 @@ jobs:
       - name: Install JS dependencies
         working-directory: src
         run: pnpm install --frozen-lockfile
+
+      - name: Resolve upgraded dependency lock
+        working-directory: src
+        run: |
+          set -euo pipefail
+          cargo update -p libbpf-sys --precise 1.7.1
+          cargo update -p netlink-packet-route --precise 0.34.0
+          cargo update -p rtnetlink --precise 0.24.0
 
       - name: Export OpenAPI and generate TS bindings
         working-directory: src
