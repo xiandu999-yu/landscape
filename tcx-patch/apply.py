@@ -1600,6 +1600,25 @@ def main() -> None:
         "const volatile u32 current_l3_offset = 14;\n"
         "const volatile __u8 land_nat_fast_ingress = 0;\n",
     )
+    # Dependency bump: libbpf-sys/rtnetlink/netlink-packet-route.  The build
+    # workflow refreshes Cargo.lock for these three before `cargo build
+    # --locked`; roll these back if the upgrade fails to compile.
+    patch(
+        "Cargo.toml",
+        'rtnetlink = { version = "0.23.0" }',
+        'rtnetlink = { version = "0.24.0" }',
+    )
+    patch(
+        "Cargo.toml",
+        'netlink-packet-route = { version = "0.33.0" }',
+        'netlink-packet-route = { version = "0.34.0" }',
+    )
+    patch(
+        "Cargo.toml",
+        'libbpf-sys = { version = "1.7.0" }',
+        'libbpf-sys = { version = "1.7.1" }',
+    )
+
     # Bare-IP link layers (IPIP/GRE/raw IP) have no Ethernet header.  Keep
     # them distinct from Tunnel/Tunnel6, which describe the device origin and
     # may still carry Ethernet (e.g. gretap).
