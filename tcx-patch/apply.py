@@ -1577,6 +1577,44 @@ def main() -> None:
         "    }\n",
     )
 
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "        if (target) {\n"
+        "            struct wan_ip_info_key wan_search_key = {0};\n",
+        "        if (target && route4_cache_fresh(target)) {\n"
+        "            struct wan_ip_info_key wan_search_key = {0};\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "            target->link_chain_id = link_chain_id;\n",
+        "            target->link_chain_id = link_chain_id;\n"
+        "            target->born = route4_cache_now();\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "            new_target_cache.link_chain_id = link_chain_id;\n",
+        "            new_target_cache.link_chain_id = link_chain_id;\n"
+        "            new_target_cache.born = route4_cache_now();\n",
+    )
+
+    # Keep the userspace layout assertions in sync with the C cache value.
+    patch(
+        "landscape-ebpf/src/maps/route/types.rs",
+        "    pub mac: [u8; 6],\n"
+        "    pub l2_data: [u8; 8],\n"
+        "    pub link_chain_id: u16,\n",
+        "    pub mac: [u8; 6],\n"
+        "    pub gate_mac: [u8; 6],\n"
+        "    pub born: u16,\n"
+        "    pub link_chain_id: u16,\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/route/types.rs",
+        "        assert_field!(Route4CacheValue, share::route4_cache_value, l2_data);\n",
+        "        assert_field!(Route4CacheValue, share::route4_cache_value, gate_mac);\n"
+        "        assert_field!(Route4CacheValue, share::route4_cache_value, born);\n",
+    )
+
     # Cache the gateway MAC with the route decision.  The cache-hit path then
     # does one L2 store + redirect instead of another ip_mac_v4 lookup.
     patch(
@@ -1585,7 +1623,40 @@ def main() -> None:
         "    u8 l2_data[8];\n",
         "    u8 mac[6];\n"
         "    u8 gate_mac[6];\n"
-        "    u16 _gate_pad;\n",
+        "    u16 born;\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_cache.h",
+        "} _route4_cache_value;\n",
+        "} _route4_cache_value;\n"
+        "\n"
+        "#define ROUTE4_CACHE_TTL_SEC 60\n"
+        "static __always_inline u16 route4_cache_now(void) {\n"
+        "    return (u16)(bpf_ktime_get_ns() >> 30);\n"
+        "}\n"
+        "static __always_inline int route4_cache_fresh(const struct route4_cache_value *v) {\n"
+        "    if (!v->born) return 0;\n"
+        "    return (u16)(route4_cache_now() - v->born) <= ROUTE4_CACHE_TTL_SEC;\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "            new_target_cache.mark_value = flow_mark;\n",
+        "            new_target_cache.mark_value = flow_mark;\n"
+        "            new_target_cache.born = route4_cache_now();\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "            target->mark_value = flow_mark;\n",
+        "            target->mark_value = flow_mark;\n"
+        "            target->born = route4_cache_now();\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "        if (target) {\n"
+        "            *flow_mark = target->mark_value;\n",
+        "        if (target && route4_cache_fresh(target)) {\n"
+        "            *flow_mark = target->mark_value;\n",
     )
     patch(
         "landscape-ebpf/src/bpf/route/route4_path.h",
