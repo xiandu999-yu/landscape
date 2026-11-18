@@ -1577,34 +1577,6 @@ def main() -> None:
         "    }\n",
     )
 
-    # LAN ingress is outbound traffic, so its own LAN_CACHE is the likely hit.
-    # Check it before WAN_CACHE (which is usually empty) to avoid a guaranteed
-    # first lookup miss on every LAN->WAN packet.
-    patch(
-        "landscape-ebpf/src/bpf/route/route4_path.h",
-        "    struct route4_cache_key search_key = {0};\n"
-        "    struct mac_value_v4 *mac_value = NULL;\n"
-        "    search_key.local_addr = context->saddr;\n"
-        "    search_key.remote_addr = context->daddr;\n",
-        "    struct route4_cache_key search_key = {0};\n"
-        "    struct mac_value_v4 *mac_value = NULL;\n"
-        "    search_key.local_addr = context->saddr;\n"
-        "    search_key.remote_addr = context->daddr;\n"
-        "    u32 lan_key = LAN_CACHE;\n"
-        "    void *lan_cache_pre = bpf_map_lookup_elem(&rt4_cache_map, &lan_key);\n"
-        "    if (lan_cache_pre) {\n"
-        "        struct route4_cache_value *pre_target =\n"
-        "            bpf_map_lookup_elem(lan_cache_pre, &search_key);\n"
-        "        if (pre_target) {\n"
-        "            *flow_mark = pre_target->mark_value;\n"
-        "            if (pre_target->ifindex != 0)\n"
-        "                return route4_redirect_by_cached_target(skb, current_l3_offset, pre_target);\n"
-        "            return route4_pick_wan_and_send_by_flow_id(skb, current_l3_offset, context,\n"
-        "                                                       pre_target->mark_value);\n"
-        "        }\n"
-        "    }\n",
-    )
-
     # Cache the gateway MAC with the route decision.  The cache-hit path then
     # does one L2 store + redirect instead of another ip_mac_v4 lookup.
     patch(
