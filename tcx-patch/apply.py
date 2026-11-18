@@ -1557,8 +1557,7 @@ def main() -> None:
         "    u8 l2_data[8];\n",
         "    u8 mac[6];\n"
         "    u8 gate_mac[6];\n"
-        "    u16 _gate_pad;\n"
-        "    u8 l2_data[8];\n",
+        "    u16 _gate_pad;\n",
     )
     patch(
         "landscape-ebpf/src/bpf/route/route4_path.h",
