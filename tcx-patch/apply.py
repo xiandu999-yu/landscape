@@ -1549,6 +1549,57 @@ def main() -> None:
         "\n"
         "chain:\n",
     )
+    # Cache the gateway MAC with the route decision.  The cache-hit path then
+    # does one L2 store + redirect instead of another ip_mac_v4 lookup.
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_cache.h",
+        "    u8 mac[6];\n"
+        "    u8 l2_data[8];\n",
+        "    u8 mac[6];\n"
+        "    u8 gate_mac[6];\n"
+        "    u16 _gate_pad;\n"
+        "    u8 l2_data[8];\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "            if (slot_target != NULL) {\n"
+        "                new_target_cache.ifindex = slot_target->ifindex;\n"
+        "                new_target_cache.has_mac = slot_target->has_mac;\n"
+        "                new_target_cache.is_docker = slot_target->is_docker;\n"
+        "                new_target_cache.gate_addr = slot_target->gate_addr;\n"
+        "                __builtin_memcpy(new_target_cache.mac, slot_target->mac, 6);\n"
+        "                new_target_cache.link_chain_id = slot_target->link_chain_id;\n"
+        "            }\n",
+        "            if (slot_target != NULL) {\n"
+        "                new_target_cache.ifindex = slot_target->ifindex;\n"
+        "                new_target_cache.has_mac = slot_target->has_mac;\n"
+        "                new_target_cache.is_docker = slot_target->is_docker;\n"
+        "                new_target_cache.gate_addr = slot_target->gate_addr;\n"
+        "                __builtin_memcpy(new_target_cache.mac, slot_target->mac, 6);\n"
+        "                new_target_cache.link_chain_id = slot_target->link_chain_id;\n"
+        "                struct mac_key_v4 gate_key = {0};\n"
+        "                gate_key.addr = slot_target->gate_addr;\n"
+        "                struct mac_value_v4 *gate_mac =\n"
+        "                    bpf_map_lookup_elem(&ip_mac_v4, &gate_key);\n"
+        "                if (gate_mac) __builtin_memcpy(new_target_cache.gate_mac, gate_mac->mac, 6);\n"
+        "            }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "    if (!target->has_mac) {\n"
+        "        return bpf_redirect(target->ifindex, 0);\n"
+        "    } else {\n"
+        "        struct mac_value_v4 *mac_value = bpf_map_lookup_elem(&ip_mac_v4, &target->gate_addr);\n",
+        "    if (!target->has_mac) {\n"
+        "        return bpf_redirect(target->ifindex, 0);\n"
+        "    } else if (target->gate_mac[0] || target->gate_mac[1] || target->gate_mac[2] ||\n"
+        "               target->gate_mac[3] || target->gate_mac[4] || target->gate_mac[5]) {\n"
+        "        int ret = store_mac_v4(skb, target->gate_mac, target->mac);\n"
+        "        if (!ret) return bpf_redirect(target->ifindex, 0);\n"
+        "    } else {\n"
+        "        struct mac_value_v4 *mac_value = bpf_map_lookup_elem(&ip_mac_v4, &target->gate_addr);\n",
+    )
+
     # route stage: first occurrence is tc_route4_lan_redirect_check_in_wan
     patch(
         "landscape-ebpf/src/bpf/route/route4_path.h",
