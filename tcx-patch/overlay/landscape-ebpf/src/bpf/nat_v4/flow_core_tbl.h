@@ -84,14 +84,6 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
     __be16 sport = ports[0];
     __be16 dport = ports[1];
 
-    /* Only packets with an external-port mapping are WAN->LAN forwarding.
-     * Router-local traffic has no mapping and must not pollute the fast-path
-     * hit-rate denominator. */
-    if (!flow_wan_mapping_exists(proto, dport)) return TC_ACT_OK;
-
-    flow_core_ctl_add(4);
-    flow_core_ctl_add(5);
-
     struct flow_core_key key = {};
     key.saddr = iph.saddr;
     key.daddr = iph.daddr;
@@ -101,67 +93,76 @@ static __always_inline int flow_core_try_wan(struct __sk_buff *skb, __u32 l3_off
     key.dir = FLOW_CORE_DIR_WAN2LAN;
 
     struct flow_core_value *value = flow_core_lookup_elem(proto, &key);
-    if (!value) {
-        flow_core_ctl_add(6);
-        return TC_ACT_OK;
-    }
-    /* Only a complete, current record may skip the chain. */
-    if (value->state != FLOW_CORE_STATE_COMPLETE ||
-        value->ver != (__u32)flow_core_ver_get(value->out_ifindex)) {
+    if (value) {
+        int mapping_ok =
+            flow_wan_mapping_matches(proto, dport, value->internal_addr, value->internal_port);
+        __u64 now = bpf_ktime_get_ns();
+        if (value->state == FLOW_CORE_STATE_COMPLETE &&
+            value->ver == (__u32)flow_core_ver_get(value->out_ifindex) &&
+            now <= value->deadline_ns && mapping_ok) {
+            /* Fast hits skip the napt_from_wan lookup used only for local
+             * traffic filtering; the recorded mapping is the authority. */
+            flow_core_ctl_add(4);
+            flow_core_ctl_add(5);
+
+            /* The ingress fast path skips the NAT stage, so it must apply the
+             * download-side QoS here; otherwise fast-path hits bypass shaping. */
+            if (qos_check(skb, QOS_DIR_DOWNLOAD, skb->len) != TC_ACT_OK) return TC_ACT_SHOT;
+
+            /* A redirect from ingress bypasses the IP forwarding path.  Keep
+             * TTL handling here instead of leaking an undecremented TTL.
+             * TTL <= 1 must go back to the slow path so the kernel can emit
+             * ICMP Time Exceeded. */
+            if (iph.ttl <= 1) return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+            if (skb->len > l3_off + FLOW_CORE_SAFE_L3_MTU)
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_MTU);
+
+            /* napt_modify() rewrites through direct packet access, so the
+             * bytes must be linear first. */
+            __u32 need = l3_off + ihl + 20;
+            if (bpf_skb_pull_data(skb, need))
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
+
+            /* The TTL byte is adjacent to protocol; update both as one
+             * network-order 16-bit word so the checksum stays valid. */
+            __be16 old_ttl_proto;
+            __builtin_memcpy(&old_ttl_proto, &iph.ttl, sizeof(old_ttl_proto));
+            __be16 new_ttl_proto = old_ttl_proto - bpf_htons(0x0100);
+            if (bpf_l3_csum_replace(skb, l3_off + __builtin_offsetof(struct iphdr, check),
+                                    old_ttl_proto, new_ttl_proto, sizeof(__be16)))
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+            if (bpf_skb_store_bytes(skb, l3_off + __builtin_offsetof(struct iphdr, ttl),
+                                    &new_ttl_proto, sizeof(new_ttl_proto), 0))
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
+
+            if (napt_modify(skb, value->internal_addr, value->internal_port,
+                            LAND_FRAG_FROM_WAN, l3_off) != TC_ACT_OK)
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
+            if (bpf_skb_store_bytes(skb, 0, value->dst_mac, 6, 0))
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAC);
+            if (bpf_skb_store_bytes(skb, 6, value->src_mac, 6, 0))
+                return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAC);
+
+            flow_core_ctl_add(2);
+            int ret = bpf_redirect(value->out_ifindex, 0);
+            return ret == TC_ACT_REDIRECT ? TC_ACT_REDIRECT : TC_ACT_OK;
+        }
+
+        if (now > value->deadline_ns) flow_core_ctl_add(3);
+        if (!mapping_ok && value->state == FLOW_CORE_STATE_COMPLETE)
+            flow_core_ctl_set(7, FLOW_CORE_EXIT_MAPPING);
         flow_core_delete_elem(proto, &key);
-        return TC_ACT_OK;
-    }
-    if (bpf_ktime_get_ns() > value->deadline_ns) {
-        flow_core_delete_elem(proto, &key);
-        flow_core_ctl_add(3);
-        return TC_ACT_OK;
-    }
-    /* The mapping must still point at the same host (guards the case where a
-     * CT disappeared without going through napt_ct_delete). */
-    if (!flow_wan_mapping_matches(proto, dport, value->internal_addr, value->internal_port)) {
-        flow_core_delete_elem(proto, &key);
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAPPING);
     }
 
-    /* The ingress fast path skips the NAT stage, so it must apply the
-     * download-side QoS here; otherwise fast-path hits bypass shaping. */
-    if (qos_check(skb, QOS_DIR_DOWNLOAD, skb->len) != TC_ACT_OK) return TC_ACT_SHOT;
+    /* Only packets with an external-port mapping are WAN->LAN forwarding.
+     * Router-local traffic has no mapping and must not pollute the fast-path
+     * hit-rate denominator.  Fast hits above already proved the mapping. */
+    if (!flow_wan_mapping_exists(proto, dport)) return TC_ACT_OK;
 
-    /* A redirect from ingress bypasses the IP forwarding path.  Keep TTL
-     * handling here instead of leaking an undecremented TTL.  TTL <= 1 must
-     * go back to the slow path so the kernel can emit ICMP Time Exceeded. */
-    if (iph.ttl <= 1) return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
-    if (skb->len > l3_off + FLOW_CORE_SAFE_L3_MTU)
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_MTU);
-
-    /* napt_modify() rewrites through direct packet access, so the bytes must be
-     * linear first. */
-    __u32 need = l3_off + ihl + 20;
-    if (bpf_skb_pull_data(skb, need)) return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
-
-    /* The TTL byte is adjacent to protocol; update both as one network-order
-     * 16-bit word so the IPv4 header checksum stays valid. */
-    __be16 old_ttl_proto;
-    __builtin_memcpy(&old_ttl_proto, &iph.ttl, sizeof(old_ttl_proto));
-    __be16 new_ttl_proto = old_ttl_proto - bpf_htons(0x0100);
-    if (bpf_l3_csum_replace(skb, l3_off + __builtin_offsetof(struct iphdr, check),
-                            old_ttl_proto, new_ttl_proto, sizeof(__be16)))
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
-    if (bpf_skb_store_bytes(skb, l3_off + __builtin_offsetof(struct iphdr, ttl),
-                            &new_ttl_proto, sizeof(new_ttl_proto), 0))
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_TTL);
-
-    if (napt_modify(skb, value->internal_addr, value->internal_port, LAND_FRAG_FROM_WAN, l3_off) !=
-        TC_ACT_OK)
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_PULL);
-    if (bpf_skb_store_bytes(skb, 0, value->dst_mac, 6, 0))
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAC);
-    if (bpf_skb_store_bytes(skb, 6, value->src_mac, 6, 0))
-        return flow_core_ctl_set(7, FLOW_CORE_EXIT_MAC);
-
-    flow_core_ctl_add(2);
-    int ret = bpf_redirect(value->out_ifindex, 0);
-    return ret == TC_ACT_REDIRECT ? TC_ACT_REDIRECT : TC_ACT_OK;
+    flow_core_ctl_add(4);
+    flow_core_ctl_add(5);
+    flow_core_ctl_add(6);
+    return TC_ACT_OK;
 }
 
 #endif /* LAND_FLOW_CORE_TBL_H */
