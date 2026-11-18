@@ -1549,6 +1549,32 @@ def main() -> None:
         "\n"
         "chain:\n",
     )
+    # The XDP route path also guards the WAN cache write with
+    # INGRESS_STATIC_MARK; drop it here too, otherwise rt4_cache_wan stays
+    # empty when XDP handles ingress.
+    patch(
+        "landscape-ebpf/src/bpf/xdp_wan_route.bpf.c",
+        "        if (ret && (ret != XDP_PASS || meta.mark == XDP_HANDOFF_TC_REDIRECT_MAGIC)) {\n"
+        "            if (get_cache_mask(meta.mark) == INGRESS_STATIC_MARK) {\n"
+        "                xdp_route4_set_cache_in_wan(ctx, &context, meta.target_chain_id);\n"
+        "            }\n"
+        "        }\n",
+        "        if (ret && (ret != XDP_PASS || meta.mark == XDP_HANDOFF_TC_REDIRECT_MAGIC)) {\n"
+        "            xdp_route4_set_cache_in_wan(ctx, &context, meta.target_chain_id);\n"
+        "        }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/xdp_wan_route.bpf.c",
+        "        if (ret && (ret != XDP_PASS || meta.mark == XDP_HANDOFF_TC_REDIRECT_MAGIC)) {\n"
+        "            if (get_cache_mask(meta.mark) == INGRESS_STATIC_MARK) {\n"
+        "                xdp_route6_set_cache_in_wan(ctx, &context, meta.target_chain_id);\n"
+        "            }\n"
+        "        }\n",
+        "        if (ret && (ret != XDP_PASS || meta.mark == XDP_HANDOFF_TC_REDIRECT_MAGIC)) {\n"
+        "            xdp_route6_set_cache_in_wan(ctx, &context, meta.target_chain_id);\n"
+        "        }\n",
+    )
+
     # Populate the WAN route cache on every successful inbound redirect, not
     # only for INGRESS_STATIC_MARK.  Without this, rt4_cache_wan stays empty and
     # every LAN->WAN packet takes the full route path.
