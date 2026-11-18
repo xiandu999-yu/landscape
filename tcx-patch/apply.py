@@ -1549,6 +1549,34 @@ def main() -> None:
         "\n"
         "chain:\n",
     )
+    # Populate the WAN route cache on every successful inbound redirect, not
+    # only for INGRESS_STATIC_MARK.  Without this, rt4_cache_wan stays empty and
+    # every LAN->WAN packet takes the full route path.
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_route.bpf.c",
+        "    if (ret == TC_ACT_REDIRECT) {\n"
+        "        u8 mark = get_cache_mask(skb->mark);\n"
+        "        if (mark == INGRESS_STATIC_MARK) {\n"
+        "            route4_set_cache_in_wan(&context, l3, skb->ifindex, tc_cb_chain(skb));\n"
+        "        }\n"
+        "    }\n",
+        "    if (ret == TC_ACT_REDIRECT) {\n"
+        "        route4_set_cache_in_wan(&context, l3, skb->ifindex, tc_cb_chain(skb));\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_wan_ingress_route.bpf.c",
+        "    if (ret == TC_ACT_REDIRECT) {\n"
+        "        u8 mark = get_cache_mask(skb->mark);\n"
+        "        if (mark == INGRESS_STATIC_MARK) {\n"
+        "            route6_set_cache_in_wan(&context, l3, skb->ifindex, tc_cb_chain(skb));\n"
+        "        }\n"
+        "    }\n",
+        "    if (ret == TC_ACT_REDIRECT) {\n"
+        "        route6_set_cache_in_wan(&context, l3, skb->ifindex, tc_cb_chain(skb));\n"
+        "    }\n",
+    )
+
     # Cache the gateway MAC with the route decision.  The cache-hit path then
     # does one L2 store + redirect instead of another ip_mac_v4 lookup.
     patch(
