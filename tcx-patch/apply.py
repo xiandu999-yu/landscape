@@ -1615,6 +1615,45 @@ def main() -> None:
         "        assert_field!(Route4CacheValue, share::route4_cache_value, born);\n",
     )
 
+    # Early LAN_CACHE probe in the dispatcher.  On a hit we can redirect
+    # before entering the route worker (scan/context/broadcast/verdict).
+    patch(
+        "landscape-ebpf/src/bpf/route/route4_path.h",
+        "static __always_inline int route4_set_cache_in_wan(",
+        "static __always_inline int route4_try_fast_cache_in_lan(struct __sk_buff *skb,\n"
+        "                                                       u32 l3_offset) {\n"
+        "    struct route_view view = { .l3_offset = l3_offset, .l3_protocol = LANDSCAPE_IPV4_TYPE };\n"
+        "    struct route4_context context = {0};\n"
+        "    if (route4_read_context_from_scan(skb, &view, &context) != TC_ACT_OK)\n"
+        "        return TC_ACT_OK;\n"
+        "\n"
+        "    struct route4_cache_key search_key = {0};\n"
+        "    search_key.local_addr = context.saddr;\n"
+        "    search_key.remote_addr = context.daddr;\n"
+        "    u32 key = LAN_CACHE;\n"
+        "    void *lan_cache = bpf_map_lookup_elem(&rt4_cache_map, &key);\n"
+        "    if (!lan_cache) return TC_ACT_OK;\n"
+        "    struct route4_cache_value *target = bpf_map_lookup_elem(lan_cache, &search_key);\n"
+        "    if (!target || !route4_cache_fresh(target)) return TC_ACT_OK;\n"
+        "    if (target->ifindex == skb->ingress_ifindex) return TC_ACT_OK;\n"
+        "    if (target->ifindex != 0)\n"
+        "        return route4_redirect_by_cached_target(skb, l3_offset, target);\n"
+        "    return route4_pick_wan_and_send_by_flow_id(skb, l3_offset, &context,\n"
+        "                                               target->mark_value);\n"
+        "}\n"
+        "\n"
+        "static __always_inline int route4_set_cache_in_wan(",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/tc_lan_ingress_route.bpf.c",
+        "    if (is_ipv4) {\n"
+        "        bpf_tail_call_static(skb, &ls_lan_ingress_tails, TC_LAN_INGRESS_V4_SLOT);\n",
+        "    if (is_ipv4) {\n"
+        "        int fast = route4_try_fast_cache_in_lan(skb, current_l3_offset);\n"
+        "        if (fast != TC_ACT_OK) return fast;\n"
+        "        bpf_tail_call_static(skb, &ls_lan_ingress_tails, TC_LAN_INGRESS_V4_SLOT);\n",
+    )
+
     # Cache the gateway MAC with the route decision.  The cache-hit path then
     # does one L2 store + redirect instead of another ip_mac_v4 lookup.
     patch(
