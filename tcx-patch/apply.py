@@ -1644,16 +1644,6 @@ def main() -> None:
         "\n"
         "static __always_inline int route4_set_cache_in_wan(",
     )
-    patch(
-        "landscape-ebpf/src/bpf/tc_lan_ingress_route.bpf.c",
-        "    if (is_ipv4) {\n"
-        "        bpf_tail_call_static(skb, &ls_lan_ingress_tails, TC_LAN_INGRESS_V4_SLOT);\n",
-        "    if (is_ipv4) {\n"
-        "        int fast = route4_try_fast_cache_in_lan(skb, current_l3_offset);\n"
-        "        if (fast != TC_ACT_OK) return fast;\n"
-        "        bpf_tail_call_static(skb, &ls_lan_ingress_tails, TC_LAN_INGRESS_V4_SLOT);\n",
-    )
-
     # Cache the gateway MAC with the route decision.  The cache-hit path then
     # does one L2 store + redirect instead of another ip_mac_v4 lookup.
     patch(
