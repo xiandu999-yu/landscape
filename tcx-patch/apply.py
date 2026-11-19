@@ -429,7 +429,9 @@ def main() -> None:
         "/* CT timer tick / metric report interval (default 30s, was 5s). */\n"
         "const volatile __u64 land_nat_report_interval_ns = 30000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
-        "const volatile __u8 land_nat_full_cone = 1;\n\n"
+        "const volatile __u8 land_nat_full_cone = 0;\n\n"
+        "/* 1 = skip IPv4 NAT for router-local egress (ingress_ifindex == 0). */\n"
+        "const volatile __u8 land_nat_skip_local = 0;\n\n"
         "/* 1 = event-driven CT timers (no periodic tick; metrics stop). */\n"
         "const volatile __u8 land_nat_event_driven = 1;\n\n"
         "/* Runtime-writable NAT knobs. Everything above lands in .rodata, which\n"
@@ -518,6 +520,7 @@ def main() -> None:
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
         "        rodata.land_nat_report_interval_ns = nat_opts.report_interval_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
+        "        rodata.land_nat_skip_local = if nat_opts.skip_local_nat { 1 } else { 0 };\n"
         "        rodata.land_nat_event_driven = if nat_opts.event_driven { 1 } else { 0 };\n"
         "        tracing::info!(\n"
         "            full_cone = nat_opts.full_cone,\n"
@@ -612,7 +615,8 @@ def main() -> None:
         "const link = ref<WanLink>(default_ethernet_link(iface_info.iface_name));\n",
         "const link = ref<WanLink>(default_ethernet_link(iface_info.iface_name));\n"
         "const nat_options = ref<NatOptions>({\n"
-        "  full_cone: true,\n"
+        "  full_cone: false,\n"
+        "  skip_local_nat: false,\n"
         "  tcp_syn_timeout_secs: 120,\n"
         "  tcp_timeout_secs: 86400,\n"
         "  udp_min_timeout_secs: 120,\n"
@@ -678,6 +682,11 @@ def main() -> None:
         '        <n-gi>\n'
         '          <n-form-item label="Full Cone (EIM/EIF)">\n'
         '            <n-switch :value="nat_options.full_cone" @update:value="(v: boolean) => (nat_options.full_cone = v)" />\n'
+        '          </n-form-item>\n'
+        '        </n-gi>\n'
+        '        <n-gi>\n'
+        '          <n-form-item label="跳过本机NAT">\n'
+        '            <n-switch :value="nat_options.skip_local_nat" @update:value="(v: boolean) => (nat_options.skip_local_nat = v)" />\n'
         '          </n-form-item>\n'
         '        </n-gi>\n'
         '      </n-grid>\n',
@@ -2737,6 +2746,19 @@ def main() -> None:
         "    crate::system::fork::clear_shaper(&landscape_app_status).await;\n"
         "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
     )
+    # 26) Skip router-local IPv4 NAT when the WebUI switch is enabled.  Applied
+    # last so it does not disturb the earlier NAT4 source patches.
+    patch(
+        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
+        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
+        "\n"
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
+        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
+        "    if (land_nat_skip_local && skb->ingress_ifindex == 0) goto chain;\n"
+        "\n"
+        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
+    )
+
     print(f"TCX overlay applied (overlay={OVERLAY})")
 
 

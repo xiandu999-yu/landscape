@@ -7,7 +7,7 @@
 //! udp_default=10m, icmp=1m) so a migrated setup keeps the same behavior.
 //!
 //! ```json
-//! { "full_cone": true, "tcp_syn_timeout_secs": 120, "tcp_timeout_secs": 86400,
+//! { "full_cone": false, "skip_local_nat": false, "tcp_syn_timeout_secs": 120, "tcp_timeout_secs": 86400,
 //!   "udp_timeout_secs": 600, "icmp_timeout_secs": 60 }
 //! ```
 
@@ -97,6 +97,8 @@ fn push_cfg() {
 pub struct NatOptions {
     /// Endpoint-independent filtering (full cone) for dynamic mappings.
     pub full_cone: bool,
+    /// Skip IPv4 NAT for router-originated (ingress_ifindex == 0) traffic.
+    pub skip_local_nat: bool,
     /// TCP half-open (SYN, or not fully established) timeout.
     pub tcp_syn_timeout_ns: u64,
     /// TCP established idle timeout.
@@ -117,7 +119,8 @@ pub struct NatOptions {
 impl Default for NatOptions {
     fn default() -> Self {
         Self {
-            full_cone: true,
+            full_cone: false,
+            skip_local_nat: false,
             tcp_syn_timeout_ns: 120 * NS,
             tcp_timeout_ns: 24 * 3600 * NS,
             udp_min_timeout_ns: 120 * NS,
@@ -196,6 +199,9 @@ impl NatOptions {
                         if let Some(v) = doc.get("full_cone").and_then(|v| v.as_bool()) {
                             opts.full_cone = v;
                         }
+                        if let Some(v) = doc.get("skip_local_nat").and_then(|v| v.as_bool()) {
+                            opts.skip_local_nat = v;
+                        }
                         if let Some(v) = doc.get("event_driven").and_then(|v| v.as_bool()) {
                             opts.event_driven = v;
                         }
@@ -221,6 +227,7 @@ impl NatOptions {
 
         // Env overrides (scripted setups / one-off debugging).
         opts.full_cone = env_bool("LANDSCAPE_NAT_FULL_CONE", opts.full_cone);
+        opts.skip_local_nat = env_bool("LANDSCAPE_NAT_SKIP_LOCAL", opts.skip_local_nat);
         // An explicit LANDSCAPE_NAT_EVENT_DRIVEN wins over the metric-mode
         // fallback below: it lets an init script pick the timer model without
         // editing landscape.toml (event mode keeps the NAT-session page empty
