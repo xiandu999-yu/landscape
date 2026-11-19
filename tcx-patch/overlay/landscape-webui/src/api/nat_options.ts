@@ -3,7 +3,6 @@ import { applyInterceptors } from "@/api";
 
 export interface NatOptions {
   full_cone: boolean;
-  skip_local_nat: boolean;
   tcp_syn_timeout_secs: number;
   tcp_timeout_secs: number;
   udp_min_timeout_secs: number;

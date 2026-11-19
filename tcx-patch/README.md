@@ -194,6 +194,27 @@ PUT  /api/v1/system/tcx/order   -> body { rules: [{ name, ingress, egress }] }
 空串表示继承全局。环境变量 `LANDSCAPE_TCX_IFACE_ORDER` 仍然优先于这个文件（WebUI 适合
 不设 env 的场景）。
 
+## 跳过 WAN 的 TC/XDP 挂载（`skip_tc_xdp`）
+
+有些部署里 WAN 的 NAT/转发由别的程序负责（einat、nftables、手写的 TC 链），Landscape
+只需要接口和路由配置，不需要再往 WAN 上挂 `land_wan_*` 这套 XDP/TC 程序。这时打开
+**跳过 TC/XDP 挂载**：
+
+- 位置：拓扑 → WAN 接口 → 「Wan 路由转发服务」弹窗里新增的 **跳过 TC/XDP 挂载** 开关
+  （下方有说明文字）；
+- 打开后 `create_route_wan_service()` 不再调用 `install_xdp_route()` /
+  `install_tc_route()`，也不会把接口标记为 XDP redirect-able；服务本身仍是 Running，
+  改配置、接口 up/down 都会按常规重跑；
+- 关闭后保存，该服务自动重启并恢复挂载；
+- 存储：`route_wan_service_configs.skip_tc_xdp`（迁移
+  `m20261119_214500_route_wan_skip_tc_xdp`，默认 `false`），`landscape config generate`
+  生成的配置也是 `false`；
+- API：`GET/PUT /api/v1/services/wan` 的 `RouteWanServiceConfig` 新增可选字段
+  `skip_tc_xdp`。
+
+同时删除了 NAT 里之前试做的「跳过本机 NAT」（`nat_options.skip_local_nat` /
+`land_nat_skip_local`）：它只把值写进 rodata，数据面从未读取，属于无效开关。
+
 ## Landscape 自身 NAT4 的优化（nat_v4）
 
 本补丁同时修正/优化 Landscape 自己的 NAPT44（`landscape-ebpf/src/bpf/nat_v4/`）：

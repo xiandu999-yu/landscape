@@ -14,9 +14,6 @@ pub struct NatOptionsDto {
     /// Endpoint-independent filtering (full cone) for dynamic mappings.
     #[serde(default)]
     pub full_cone: bool,
-    /// Skip IPv4 NAT for router-originated traffic.
-    #[serde(default)]
-    pub skip_local_nat: bool,
     #[serde(default = "default_tcp_syn")]
     pub tcp_syn_timeout_secs: u64,
     #[serde(default = "default_tcp")]
@@ -59,7 +56,6 @@ impl Default for NatOptionsDto {
     fn default() -> Self {
         Self {
             full_cone: false,
-            skip_local_nat: false,
             tcp_syn_timeout_secs: default_tcp_syn(),
             tcp_timeout_secs: default_tcp(),
             udp_min_timeout_secs: default_udp_min(),

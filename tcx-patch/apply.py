@@ -430,8 +430,6 @@ def main() -> None:
         "const volatile __u64 land_nat_report_interval_ns = 30000000000ULL;\n\n"
         "/* 1 = endpoint-independent filtering (full cone) for dynamic mappings. */\n"
         "const volatile __u8 land_nat_full_cone = 0;\n\n"
-        "/* 1 = skip IPv4 NAT for router-local egress (ingress_ifindex == 0). */\n"
-        "const volatile __u8 land_nat_skip_local = 0;\n\n"
         "/* 1 = event-driven CT timers (no periodic tick; metrics stop). */\n"
         "const volatile __u8 land_nat_event_driven = 1;\n\n"
         "/* Runtime-writable NAT knobs. Everything above lands in .rodata, which\n"
@@ -520,7 +518,6 @@ def main() -> None:
         "        rodata.land_nat_icmp_timeout_ns = nat_opts.icmp_timeout_ns;\n"
         "        rodata.land_nat_report_interval_ns = nat_opts.report_interval_ns;\n"
         "        rodata.land_nat_full_cone = if nat_opts.full_cone { 1 } else { 0 };\n"
-        "        rodata.land_nat_skip_local = if nat_opts.skip_local_nat { 1 } else { 0 };\n"
         "        rodata.land_nat_event_driven = if nat_opts.event_driven { 1 } else { 0 };\n"
         "        tracing::info!(\n"
         "            full_cone = nat_opts.full_cone,\n"
@@ -616,7 +613,6 @@ def main() -> None:
         "const link = ref<WanLink>(default_ethernet_link(iface_info.iface_name));\n"
         "const nat_options = ref<NatOptions>({\n"
         "  full_cone: false,\n"
-        "  skip_local_nat: false,\n"
         "  tcp_syn_timeout_secs: 120,\n"
         "  tcp_timeout_secs: 86400,\n"
         "  udp_min_timeout_secs: 120,\n"
@@ -682,11 +678,6 @@ def main() -> None:
         '        <n-gi>\n'
         '          <n-form-item label="Full Cone (EIM/EIF)">\n'
         '            <n-switch :value="nat_options.full_cone" @update:value="(v: boolean) => (nat_options.full_cone = v)" />\n'
-        '          </n-form-item>\n'
-        '        </n-gi>\n'
-        '        <n-gi>\n'
-        '          <n-form-item label="跳过本机NAT">\n'
-        '            <n-switch :value="nat_options.skip_local_nat" @update:value="(v: boolean) => (nat_options.skip_local_nat = v)" />\n'
         '          </n-form-item>\n'
         '        </n-gi>\n'
         '      </n-grid>\n',
@@ -2746,17 +2737,229 @@ def main() -> None:
         "    crate::system::fork::clear_shaper(&landscape_app_status).await;\n"
         "    tracing::info!(\"Landscape Router shutdown complete.\");\n",
     )
-    # 26) Skip router-local IPv4 NAT when the WebUI switch is enabled.  Applied
-    # last so it does not disturb the earlier NAT4 source patches.
+
+    # 26) WAN route service: `skip_tc_xdp` keeps the service (and its status /
+    #     config) but attaches no XDP/TC route program, for setups where
+    #     another datapath (einat, nftables, a hand-rolled TC chain, ...) owns
+    #     the WAN interface. Persisted in the DB, exposed through the OpenAPI
+    #     config and the WAN route service modal.
+    #    26a) config field, DB column/entity and CLI-generated config
     patch(
-        "landscape-ebpf/src/bpf/tc_nat4_v4.bpf.c",
-        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
+        "landscape-common/src/wan_service/wan_route/config.rs",
+        "pub struct RouteWanServiceConfig {\n"
+        "    pub iface_name: String,\n"
+        "    pub enable: bool,\n"
+        '    #[serde(default = "get_f64_timestamp")]\n',
+        "pub struct RouteWanServiceConfig {\n"
+        "    pub iface_name: String,\n"
+        "    pub enable: bool,\n"
+        "    /// Do not attach the XDP/TC WAN-route programs for this interface.\n"
+        "    /// The service keeps its status and config; the datapath is left to\n"
+        "    /// whoever else owns the interface (einat, nftables, ...).\n"
+        "    #[serde(default)]\n"
+        '    #[cfg_attr(feature = "openapi", schema(required = false))]\n'
+        "    pub skip_tc_xdp: bool,\n"
+        '    #[serde(default = "get_f64_timestamp")]\n',
+    )
+    patch(
+        "landscape-database/src/route_wan/entity.rs",
+        "    #[sea_orm(primary_key, auto_increment = false)]\n"
+        "    pub iface_name: String,\n"
+        "    pub enable: bool,\n"
         "\n"
-        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
-        "    if (!not_host_direct(skb_mark(skb))) goto chain;\n"
-        "    if (land_nat_skip_local && skb->ingress_ifindex == 0) goto chain;\n"
+        "    pub update_at: DBTimestamp,\n",
+        "    #[sea_orm(primary_key, auto_increment = false)]\n"
+        "    pub iface_name: String,\n"
+        "    pub enable: bool,\n"
+        "    pub skip_tc_xdp: bool,\n"
         "\n"
-        "    if (!tc_nat_read4(skb, &view, &src_addr, &dst_addr, current_l3_offset, LAND_FRAG_FROM_LAN))\n",
+        "    pub update_at: DBTimestamp,\n",
+    )
+    patch(
+        "landscape-database/src/route_wan/entity.rs",
+        "        RouteWanServiceConfig {\n"
+        "            iface_name: entity.iface_name,\n"
+        "            enable: entity.enable,\n"
+        "            update_at: entity.update_at,\n"
+        "        }\n",
+        "        RouteWanServiceConfig {\n"
+        "            iface_name: entity.iface_name,\n"
+        "            enable: entity.enable,\n"
+        "            skip_tc_xdp: entity.skip_tc_xdp,\n"
+        "            update_at: entity.update_at,\n"
+        "        }\n",
+    )
+    patch(
+        "landscape-database/src/route_wan/entity.rs",
+        "        active.enable = Set(self.enable);\n"
+        "        active.update_at = Set(self.update_at);\n",
+        "        active.enable = Set(self.enable);\n"
+        "        active.skip_tc_xdp = Set(self.skip_tc_xdp);\n"
+        "        active.update_at = Set(self.update_at);\n",
+    )
+    patch(
+        "landscape-database/migration/src/tables/route.rs",
+        "#[derive(Iden)]\n"
+        "pub enum RouteWanServiceConfigs {\n"
+        "    Table,\n"
+        "    IfaceName,\n"
+        "    Enable,\n"
+        "    UpdateAt,\n"
+        "}\n",
+        "#[derive(Iden)]\n"
+        "pub enum RouteWanServiceConfigs {\n"
+        "    Table,\n"
+        "    IfaceName,\n"
+        "    Enable,\n"
+        "    SkipTcXdp,\n"
+        "    UpdateAt,\n"
+        "}\n",
+    )
+    patch(
+        "landscape-database/migration/src/lib.rs",
+        "mod m20261031_053957_ddns_per_record_limit;\n",
+        "mod m20261031_053957_ddns_per_record_limit;\n"
+        "mod m20261119_214500_route_wan_skip_tc_xdp;\n",
+    )
+    patch(
+        "landscape-database/migration/src/lib.rs",
+        "            Box::new(m20261031_053957_ddns_per_record_limit::Migration),\n",
+        "            Box::new(m20261031_053957_ddns_per_record_limit::Migration),\n"
+        "            Box::new(m20261119_214500_route_wan_skip_tc_xdp::Migration),\n",
+    )
+    patch(
+        "landscape-common/src/config/cli/generate.rs",
+        "            init.route_wans.push(RouteWanServiceConfig {\n"
+        "                iface_name: iface.clone(),\n"
+        "                enable: true,\n"
+        "                update_at: now,\n"
+        "            });\n",
+        "            init.route_wans.push(RouteWanServiceConfig {\n"
+        "                iface_name: iface.clone(),\n"
+        "                enable: true,\n"
+        "                skip_tc_xdp: false,\n"
+        "                update_at: now,\n"
+        "            });\n",
+    )
+
+    #    26b) skip the datapath attach; the service state machine is unchanged
+    wan_route_svc = "landscape/src/wan_service/wan_route_service.rs"
+    patch(
+        wan_route_svc,
+        "                let iface_name = config.iface_name.clone();\n"
+        "                let dataplane = self.dataplane.clone();\n",
+        "                let iface_name = config.iface_name.clone();\n"
+        "                let skip_tc_xdp = config.skip_tc_xdp;\n"
+        "                let dataplane = self.dataplane.clone();\n",
+    )
+    patch(
+        wan_route_svc,
+        "                        create_route_wan_service(\n"
+        "                            iface_name,\n"
+        "                            iface.index,\n"
+        "                            iface.has_eth_header(),\n"
+        "                            task_status,\n"
+        "                            dataplane,\n"
+        "                        )\n",
+        "                        create_route_wan_service(\n"
+        "                            iface_name,\n"
+        "                            iface.index,\n"
+        "                            iface.has_eth_header(),\n"
+        "                            skip_tc_xdp,\n"
+        "                            task_status,\n"
+        "                            dataplane,\n"
+        "                        )\n",
+    )
+    patch(
+        wan_route_svc,
+        "pub async fn create_route_wan_service(\n"
+        "    iface_name: String,\n"
+        "    ifindex: u32,\n"
+        "    has_eth_header: bool,\n"
+        "    service_status: ServiceHandle,\n"
+        "    dataplane: Arc<dyn WanRouteDataplane>,\n"
+        ") {\n"
+        '    tracing::info!("start route wan at ifindex: {ifindex}");\n'
+        "    dataplane.del_redirect_able(ifindex);\n"
+        "\n"
+        "    let mut xdp_handle: Option<Box<dyn landscape_common::ebpf::DataplaneGuard>> = None;\n",
+        "pub async fn create_route_wan_service(\n"
+        "    iface_name: String,\n"
+        "    ifindex: u32,\n"
+        "    has_eth_header: bool,\n"
+        "    skip_tc_xdp: bool,\n"
+        "    service_status: ServiceHandle,\n"
+        "    dataplane: Arc<dyn WanRouteDataplane>,\n"
+        ") {\n"
+        '    tracing::info!("start route wan at ifindex: {ifindex}");\n'
+        "    dataplane.del_redirect_able(ifindex);\n"
+        "\n"
+        "    // `skip_tc_xdp` keeps the service alive (status Running, hot config\n"
+        "    // updates still restart it) but attaches nothing: another datapath\n"
+        "    // owns the interface. No redirect-able state is set for it either.\n"
+        "    if skip_tc_xdp {\n"
+        "        tracing::info!(\n"
+        '            "skip_tc_xdp enabled for {iface_name}: xdp/tc wan route not installed"\n'
+        "        );\n"
+        "        service_status.just_change_status(ServiceStatus::Running);\n"
+        "        service_status.stop_token().cancelled().await;\n"
+        "        service_status.just_change_status(ServiceStatus::Stop);\n"
+        "        return;\n"
+        "    }\n"
+        "\n"
+        "    let mut xdp_handle: Option<Box<dyn landscape_common::ebpf::DataplaneGuard>> = None;\n",
+    )
+
+    #    26c) WAN route service modal: per-interface switch + hint
+    patch(
+        wan_modal,
+        "      iface_name: iface_info.iface_name,\n"
+        "      enable: true,\n"
+        "      update_at: 0,\n",
+        "      iface_name: iface_info.iface_name,\n"
+        "      enable: true,\n"
+        "      skip_tc_xdp: false,\n"
+        "      update_at: 0,\n",
+    )
+    patch(
+        wan_modal,
+        '    <TcxOrderSection :iface_name="iface_info.iface_name" :egress="true" />\n',
+        '    <n-form v-if="service_config !== null" :model="service_config">\n'
+        "      <n-form-item :label=\"t('network.route_wan.skip_tc_xdp')\">\n"
+        '        <n-switch\n'
+        '          :value="service_config.skip_tc_xdp"\n'
+        '          @update:value="(v: boolean) => (service_config.skip_tc_xdp = v)"\n'
+        "        />\n"
+        "      </n-form-item>\n"
+        '      <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 12px">\n'
+        '        {{ t("network.route_wan.skip_tc_xdp_hint") }}\n'
+        "      </n-text>\n"
+        "    </n-form>\n"
+        "\n"
+        '    <TcxOrderSection :iface_name="iface_info.iface_name" :egress="true" />\n',
+    )
+    patch(
+        "landscape-webui/src/i18n/zh/network/index.ts",
+        '  route_wan: {\n    title: "Wan 路由转发服务",\n  },\n',
+        "  route_wan: {\n"
+        '    title: "Wan 路由转发服务",\n'
+        '    skip_tc_xdp: "跳过 TC/XDP 挂载",\n'
+        "    skip_tc_xdp_hint:\n"
+        '      "开启后不再为这个 WAN 接口加载 XDP/TC 路由程序（适合由 einat、nftables 等接管数据面）；'
+        '服务本身仍保持启用，保存后自动重启生效。",\n'
+        "  },\n",
+    )
+    patch(
+        "landscape-webui/src/i18n/en/network/index.ts",
+        '  route_wan: {\n    title: "WAN Route Forwarding Service",\n  },\n',
+        "  route_wan: {\n"
+        '    title: "WAN Route Forwarding Service",\n'
+        '    skip_tc_xdp: "Skip TC/XDP Attach",\n'
+        "    skip_tc_xdp_hint:\n"
+        '      "Do not load the WAN XDP/TC route programs for this interface (for setups where '
+        'einat, nftables or another datapath owns it). The service stays enabled and restarts '
+        'automatically after saving.",\n'
+        "  },\n",
     )
 
     print(f"TCX overlay applied (overlay={OVERLAY})")
