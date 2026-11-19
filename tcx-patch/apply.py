@@ -2910,7 +2910,11 @@ def main() -> None:
         "    let mut xdp_handle: Option<Box<dyn landscape_common::ebpf::DataplaneGuard>> = None;\n",
     )
 
-    #    26c) WAN route service modal: per-interface switch + hint
+    #    26c) WAN route service modal: per-interface switch + hint.
+    #         The switch goes through a writable computed (same pattern as
+    #         `service_enabled`): an inline arrow handler would lose the
+    #         `v-if="service_config !== null"` narrowing inside the closure,
+    #         which `vue-tsc` rejects with TS18047 (`possibly 'null'`).
     patch(
         wan_modal,
         "      iface_name: iface_info.iface_name,\n"
@@ -2923,13 +2927,44 @@ def main() -> None:
     )
     patch(
         wan_modal,
+        "const service_enabled = computed({\n"
+        "  get() {\n"
+        "    return service_config.value?.enable ?? false;\n"
+        "  },\n"
+        "  set(value: boolean) {\n"
+        "    if (service_config.value) {\n"
+        "      service_config.value.enable = value;\n"
+        "    }\n"
+        "  },\n"
+        "});\n",
+        "const service_enabled = computed({\n"
+        "  get() {\n"
+        "    return service_config.value?.enable ?? false;\n"
+        "  },\n"
+        "  set(value: boolean) {\n"
+        "    if (service_config.value) {\n"
+        "      service_config.value.enable = value;\n"
+        "    }\n"
+        "  },\n"
+        "});\n"
+        "\n"
+        "const skip_tc_xdp = computed({\n"
+        "  get() {\n"
+        "    return service_config.value?.skip_tc_xdp ?? false;\n"
+        "  },\n"
+        "  set(value: boolean) {\n"
+        "    if (service_config.value) {\n"
+        "      service_config.value.skip_tc_xdp = value;\n"
+        "    }\n"
+        "  },\n"
+        "});\n",
+    )
+    patch(
+        wan_modal,
         '    <TcxOrderSection :iface_name="iface_info.iface_name" :egress="true" />\n',
         '    <n-form v-if="service_config !== null" :model="service_config">\n'
         "      <n-form-item :label=\"t('network.route_wan.skip_tc_xdp')\">\n"
-        '        <n-switch\n'
-        '          :value="service_config.skip_tc_xdp"\n'
-        '          @update:value="(v: boolean) => (service_config.skip_tc_xdp = v)"\n'
-        "        />\n"
+        '        <n-switch v-model:value="skip_tc_xdp" />\n'
         "      </n-form-item>\n"
         '      <n-text depth="3" style="font-size: 12px; display: block; margin-bottom: 12px">\n'
         '        {{ t("network.route_wan.skip_tc_xdp_hint") }}\n'
