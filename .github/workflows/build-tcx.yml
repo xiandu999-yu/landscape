@@ -113,6 +113,22 @@ jobs:
             echo "::error::fastpath_stats module not registered"
             exit 1
           }
+          grep -q 'pub skip_tc_xdp: bool,' src/landscape-common/src/wan_service/wan_route/config.rs || {
+            echo "::error::RouteWanServiceConfig has no skip_tc_xdp field"
+            exit 1
+          }
+          grep -q 'm20261119_214500_route_wan_skip_tc_xdp' src/landscape-database/migration/src/lib.rs || {
+            echo "::error::skip_tc_xdp migration not registered"
+            exit 1
+          }
+          grep -q 'if skip_tc_xdp {' src/landscape/src/wan_service/wan_route_service.rs || {
+            echo "::error::create_route_wan_service does not honor skip_tc_xdp"
+            exit 1
+          }
+          if grep -RqE 'skip_local_nat|land_nat_skip_local' src/landscape-ebpf/src src/landscape-webserver/src src/landscape-webui/src; then
+            echo "::error::removed NAT skip_local_nat switch is still present"
+            exit 1
+          fi
 
 
       - name: Show overlay changes
@@ -367,6 +383,8 @@ jobs:
             echo "::error::NAT modal timeout inputs not patched"; exit 1; }
           grep -q 'nat_options' src/landscape-webui/src/components/nat/NATEditModal.vue || {
             echo "::error::NAT modal nat_options wiring missing"; exit 1; }
+          grep -q 'skip_tc_xdp' src/landscape-webui/src/components/route/wan/RouteWanServiceEditModal.vue || {
+            echo "::error::WAN modal skip_tc_xdp switch missing"; exit 1; }
 
       - name: Install build toolchain
         working-directory: src
@@ -432,10 +450,16 @@ jobs:
             echo "::error::the built bundle has no NAT timeout inputs (nat_options) 鈥?NAT modal not patched"
             exit 1
           fi
+          if ! grep -Rql "skip_tc_xdp" landscape-webui/dist; then
+            echo "::error::the built bundle has no skip_tc_xdp switch"
+            exit 1
+          fi
           echo "TCX editor present in:"
           grep -Rl "tcx/order" landscape-webui/dist | head -n 5
           echo "NAT options present in:"
           grep -Rl "tcp_syn_timeout_secs" landscape-webui/dist | head -n 5
+          echo "skip_tc_xdp present in:"
+          grep -Rl "skip_tc_xdp" landscape-webui/dist | head -n 5
 
       - name: Package static assets
         working-directory: src
