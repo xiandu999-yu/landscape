@@ -3037,6 +3037,187 @@ def main() -> None:
         "    if (tc_cb_forwarded(skb)) {\n",
     )
 
+    #    26b3) NAT coexistence.  Router-originated flows that bypassed the WAN
+    #          route chain are not NATed, so their replies carry no mapping.
+    #          Without a fix the WAN ingress NAT stage drops them as unknown
+    #          mappings, turning the bypass into a block as soon as NAT is
+    #          enabled.  The switch is published through a pinned
+    #          `wan_local_skip` map (the route service writes it on attach);
+    #          the NAT stages pass such replies to the local stack.
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h",
+        '#include "nat_v4/tc_nat4_rodata.h"\n',
+        '#include "nat_v4/tc_nat4_rodata.h"\n'
+        '#include "chain/wan_local_skip.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/xdp_nat4.h",
+        '#include "reader/xdp_nat_view.h"\n',
+        '#include "reader/xdp_nat_view.h"\n'
+        '#include "chain/wan_local_skip.h"\n',
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/tc_nat4_packet.h",
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC)) {\n"
+        "        napt_stat_inc(NAPT_STAT_MAP_MISS);\n"
+        "        return TC_ACT_SHOT;\n"
+        "    }\n",
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC)) {\n"
+        "        // Router-originated flows that bypass the route chain are not\n"
+        "        // NATed, so their replies have no mapping: hand them to the\n"
+        "        // local stack instead of dropping them as unknown mappings.\n"
+        "        if (wan_local_skip_get(skb->ifindex)) return TC_ACT_UNSPEC;\n"
+        "        napt_stat_inc(NAPT_STAT_MAP_MISS);\n"
+        "        return TC_ACT_SHOT;\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/xdp_nat4.h",
+        "#define NAPT_XDP_OK 0\n"
+        "#define NAPT_XDP_DROP 1\n",
+        "#define NAPT_XDP_OK 0\n"
+        "#define NAPT_XDP_DROP 1\n"
+        "/* Unknown mapping on a WAN whose router-originated traffic bypasses\n"
+        " * NAT: continue the chain and deliver the packet to the local stack. */\n"
+        "#define NAPT_XDP_SKIP_NAT 2\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/nat_v4/xdp_nat4.h",
+        "    struct napt_from_wan_value *mapping = napt_wan_lookup(proto, external_port);\n"
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC))\n"
+        "        return NAPT_XDP_DROP;\n",
+        "    struct napt_from_wan_value *mapping = napt_wan_lookup(proto, external_port);\n"
+        "    if (!mapping || (mapping->kind != NAPT_MAPPING_DYNAMIC && mapping->kind != NAPT_MAPPING_STATIC)) {\n"
+        "        if (wan_local_skip_get(ifindex)) return NAPT_XDP_SKIP_NAT;\n"
+        "        return NAPT_XDP_DROP;\n"
+        "    }\n",
+    )
+    patch(
+        "landscape-ebpf/src/bpf/xdp_nat4_v4.bpf.c",
+        "    int rc = xdp_napt_wan_state(&view, src_addr, dst_addr, current_ifindex, &meta.mark, bytes,\n"
+        "                                &new_addr, &new_port, &is_static);\n"
+        "    if (rc != NAPT_XDP_OK) return XDP_DROP;\n",
+        "    int rc = xdp_napt_wan_state(&view, src_addr, dst_addr, current_ifindex, &meta.mark, bytes,\n"
+        "                                &new_addr, &new_port, &is_static);\n"
+        "    if (rc == NAPT_XDP_SKIP_NAT) return XDP_PASS;\n"
+        "    if (rc != NAPT_XDP_OK) return XDP_DROP;\n",
+    )
+
+    #           pinned map + startup creation + skeleton pinning + the route
+    #           service writes the per-iface flag before attaching the ingress
+    #           hook.
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "    pub fa4_fast: PathBuf,\n",
+        "    pub fa4_fast: PathBuf,\n"
+        "    pub wan_local_skip: PathBuf,\n",
+    )
+    patch(
+        "landscape-ebpf/src/lib.rs",
+        "            fa4_fast: root.join(nat::FA4_FAST_PIN),\n",
+        "            fa4_fast: root.join(nat::FA4_FAST_PIN),\n"
+        "            wan_local_skip: root.join(nat::WAN_LOCAL_SKIP_PIN),\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        'pub(crate) const FA4_FAST_PIN: &str = "fa4_fast";\n',
+        'pub(crate) const FA4_FAST_PIN: &str = "fa4_fast";\n'
+        'pub(crate) const WAN_LOCAL_SKIP_PIN: &str = "wan_local_skip";\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/nat/init.rs",
+        "/// Create or reuse the pinned `fa4_fast` hash at `path`.\n"
+        "pub fn init_fa4_fast(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_SPEC, path)\n"
+        "}\n",
+        "/// Create or reuse the pinned `fa4_fast` hash at `path`.\n"
+        "pub fn init_fa4_fast(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&FA4_FAST_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// `wan_local_skip`: per-WAN `skip_tc_xdp` flag (key u32 ifindex, value u8).\n"
+        "pub(crate) const WAN_LOCAL_SKIP_SPEC: MapCreateSpec = MapCreateSpec {\n"
+        "    map_type: MapType::Hash,\n"
+        "    name: WAN_LOCAL_SKIP_PIN,\n"
+        "    key_size: 4,\n"
+        "    value_size: 1,\n"
+        "    max_entries: 1024,\n"
+        "    map_flags: 0,\n"
+        "    inner: None,\n"
+        "};\n"
+        "\n"
+        "/// Create or reuse the pinned `wan_local_skip` hash at `path`.\n"
+        "pub fn init_wan_local_skip(path: &Path) -> LdEbpfResult<MapHandle> {\n"
+        "    ensure_pinned_map(&WAN_LOCAL_SKIP_SPEC, path)\n"
+        "}\n"
+        "\n"
+        "/// Record whether router-originated traffic bypasses the route chain on\n"
+        "/// `ifindex`.  The WAN ingress NAT stages read this to pass replies that\n"
+        "/// have no mapping (the flow was never NATed) to the local stack.\n"
+        "pub fn set_wan_local_skip(path: &Path, ifindex: u32, skip: bool) {\n"
+        "    let map = match libbpf_rs::MapHandle::from_pinned_path(path) {\n"
+        "        Ok(map) => map,\n"
+        "        Err(e) => {\n"
+        '            tracing::warn!("open wan_local_skip map failed: {e}");\n'
+        "            return;\n"
+        "        }\n"
+        "    };\n"
+        "\n"
+        "    let key = ifindex.to_ne_bytes();\n"
+        "    let value = [u8::from(skip)];\n"
+        "    if let Err(e) = map.update(&key, &value, MapFlags::ANY) {\n"
+        '        tracing::warn!("set wan_local_skip ifindex={ifindex} skip={skip} failed: {e}");\n'
+        "    }\n"
+        "}\n",
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("init fa4_fast failed");\n',
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("init fa4_fast failed");\n'
+        '    nat::init_wan_local_skip(&paths.wan_local_skip).expect("init wan_local_skip failed");\n',
+    )
+    patch(
+        "landscape-ebpf/src/maps/mod.rs",
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("test init fa4_fast");\n',
+        '    nat::init_fa4_fast(&paths.fa4_fast).expect("test init fa4_fast");\n'
+        '    nat::init_wan_local_skip(&paths.wan_local_skip).expect("test init wan_local_skip");\n',
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n",
+        "    pin_and_reuse_map(&mut open.maps.fa4_fast, &paths.fa4_fast)?;\n"
+        "    pin_and_reuse_map(&mut open.maps.wan_local_skip, &paths.wan_local_skip)?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/stages/nat4.rs",
+        "    crate::bpf_ctx!(\n"
+        "        xdp_open.maps.nat_metric_events.reuse_fd(tc_skel.maps.nat_metric_events.as_fd()),\n"
+        '        "xdp_nat4_v4 reuse nat_metric_events"\n'
+        "    )?;\n",
+        "    crate::bpf_ctx!(\n"
+        "        xdp_open.maps.nat_metric_events.reuse_fd(tc_skel.maps.nat_metric_events.as_fd()),\n"
+        '        "xdp_nat4_v4 reuse nat_metric_events"\n'
+        "    )?;\n"
+        "    crate::bpf_ctx!(\n"
+        "        pin_and_reuse_map(&mut xdp_open.maps.wan_local_skip, &paths.wan_local_skip),\n"
+        '        "xdp_nat4_v4 pin wan_local_skip"\n'
+        "    )?;\n",
+    )
+    patch(
+        "landscape-ebpf/src/chain/tc_wan_route.rs",
+        "    let intro_skel = bpf_ctx!(open_skel.load(), \"load per-if tc_wan_ingress_intro\")?;\n"
+        "\n"
+        "    let mut ingress_hook = TcHookProxy::new(\n",
+        "    let intro_skel = bpf_ctx!(open_skel.load(), \"load per-if tc_wan_ingress_intro\")?;\n"
+        "\n"
+        "    // Publish the skip-local switch to the NAT stages before the ingress\n"
+        "    // hook can see packets: replies to non-NATed router flows must be\n"
+        "    // delivered locally instead of being dropped as unknown mappings.\n"
+        "    crate::maps::nat::set_wan_local_skip(&paths.wan_local_skip, ifindex, skip_local_traffic);\n"
+        "\n"
+        "    let mut ingress_hook = TcHookProxy::new(\n",
+    )
+
     #    26c) WAN route service modal: per-interface switch + hint.
     #         The switch goes through a writable computed (same pattern as
     #         `service_enabled`): an inline arrow handler would lose the

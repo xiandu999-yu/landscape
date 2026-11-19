@@ -203,14 +203,22 @@ NAT 改写）。打开 **跳过本机流量** 后：
 
 - 位置：拓扑 → WAN 接口 → 「Wan 路由转发服务」弹窗里的 **跳过本机流量** 开关；
 - 实现：开关作为 per-interface rodata（`skip_local_traffic`）在打开 egress skeleton
-  时写入；`land_wan_egress_route` 对 `skb->ingress_ifindex == 0` 的报文直接返回
-  `TC_ACT_UNSPEC`（TCX_NEXT / 放行），**不再选 WAN、不做策略路由、NAT 和 PPPoE 封装**；
+  时写入；判断放在 `land_wan_egress_route` 的**最前面**（`CB_FORWARDED` 与 HostDirect
+  分支之前），对 `skb->ingress_ifindex == 0` 的报文直接返回 `TC_ACT_UNSPEC`
+  （TCX_NEXT / 放行）——本机流量的处理与「根本没挂载这个钩子」一致：不选 WAN、不做
+  策略路由 / NAT / 封装，也不会被重定向；
 - **转发流量不受影响**：LAN→WAN 转发（`ingress_ifindex != 0` 或 `CB_FORWARDED`）照常走
   路由链，XDP/TC 钩子也照常挂载；
-- 带 `HostDirect` SO_MARK 的本机控制面流量（如 native PPPoE 的 DHCPv6-PD socket）仍然
-  走自己的 chain，不受该开关影响；
-- 返回 `TC_ACT_UNSPEC` 而不是 `TC_ACT_OK`，链上排在 Landscape 后面的程序（例如 einat
-  的 `egress_snat`）仍能看到这些本机报文；
+- 连 `HostDirect` SO_MARK 的本机控制面流量（如 native PPPoE 的 DHCPv6-PD socket）和残留
+  的 `CB_FORWARDED` 标记也一并放行——这就是「未挂载」语义；如果该 WAN 是 native PPPoE、
+  需要本机控制面走封装，请不要对该 WAN 开启此开关；
+- 返回 `TC_ACT_UNSPEC` 而不是 `TC_ACT_OK`：等价于「这个钩子不存在」，链上排在 Landscape
+  前后的其他程序（例如 einat 的 `egress_snat`）仍按原顺序看到这些本机报文；
+- **启用 NAT 时**：本机流量不走 egress NAT，因此没有 `napt_from_wan` 映射；WAN 入向
+  NAT 查不到映射时不再按 `MAP_MISS` 丢弃，而是交给本机协议栈（按 iface 的
+  `wan_local_skip` 标志生效，见 `bpf/chain/wan_local_skip.h`）。端口转发、转发流的
+  静态/动态映射仍照旧 DNAT；没有映射的 WAN 端口会落到本机 INPUT（本机防火墙仍可按
+  原规则处理）。该放行目前只覆盖 IPv4 NAT；
 - 存储：`route_wan_service_configs.skip_tc_xdp`（迁移
   `m20261119_214500_route_wan_skip_tc_xdp`，默认 `false`），`landscape config generate`
   生成的配置也是 `false`；保存后自动重启该 WAN 路由服务；
