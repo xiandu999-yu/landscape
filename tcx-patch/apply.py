@@ -2755,8 +2755,9 @@ def main() -> None:
         "    pub iface_name: String,\n"
         "    pub enable: bool,\n"
         "    /// Skip this WAN link's XDP/TC route chain for router-originated\n"
-        "    /// (local) egress traffic: no policy routing, NAT or PPPoE\n"
-        "    /// encapsulation. Forwarded traffic keeps using the chain.\n"
+        "    /// (local) egress traffic, exactly as if the hook were not attached:\n"
+        "    /// no policy routing, NAT or PPPoE encapsulation. Forwarded traffic\n"
+        "    /// keeps using the chain.\n"
         "    #[serde(default)]\n"
         '    #[cfg_attr(feature = "openapi", schema(required = false))]\n'
         "    pub skip_tc_xdp: bool,\n"
@@ -2999,10 +3000,10 @@ def main() -> None:
         "        &mut open_skel.maps.tc_wan_egress_roots,\n",
     )
 
-    #    26b2) BPF side: the rodata switch is honoured only for packets with
-    #          `ingress_ifindex == 0` (router-originated).  Host-direct
-    #          control-plane traffic (SO_MARK, e.g. PPPoE PD) still rides its
-    #          chain; forwarded traffic is untouched.
+    #    26b2) BPF side: the check runs before every other branch, so a
+    #          router-originated packet is handled exactly as if this hook were
+    #          not attached (stale FORWARDED marks and HostDirect control
+    #          plane included).  Forwarded traffic is untouched.
     egress_bpf = "landscape-ebpf/src/bpf/tc_wan_egress_route.bpf.c"
     patch(
         egress_bpf,
@@ -3015,31 +3016,25 @@ def main() -> None:
     )
     patch(
         egress_bpf,
-        "    u32 mark = skb_mark(skb);\n"
-        "    if (unlikely(is_host_direct(mark))) {\n"
-        "        u32 chain = get_host_direct_chain_id(mark);\n"
-        "        bpf_tail_call(skb, &tc_wan_egress_roots, chain);\n"
-        '        ld_from_wan_log("host-direct root tail failed chain %u; passing", chain);\n'
-        "        return TC_ACT_UNSPEC;\n"
-        "    }\n"
-        "\n"
-        "    if (likely(current_l3_offset > 0)) {\n",
-        "    u32 mark = skb_mark(skb);\n"
-        "    if (unlikely(is_host_direct(mark))) {\n"
-        "        u32 chain = get_host_direct_chain_id(mark);\n"
-        "        bpf_tail_call(skb, &tc_wan_egress_roots, chain);\n"
-        '        ld_from_wan_log("host-direct root tail failed chain %u; passing", chain);\n'
-        "        return TC_ACT_UNSPEC;\n"
-        "    }\n"
-        "\n"
-        "    // `skip_local_traffic`: ordinary router-originated traffic (no\n"
-        "    // ingress interface) leaves untouched; TC_ACT_UNSPEC keeps the rest\n"
-        "    // of the TC/TCX chain (e.g. einat SNAT) running.\n"
+        'SEC("tc/egress")\n'
+        "int land_wan_egress_route(struct __sk_buff *skb) {\n"
+        "    // Already routed by a landscape pick_wan: enter the target link's\n"
+        "    // chain directly, the decision (and its chain id) travels in cb.\n"
+        "    if (tc_cb_forwarded(skb)) {\n",
+        'SEC("tc/egress")\n'
+        "int land_wan_egress_route(struct __sk_buff *skb) {\n"
+        "    // `skip_local_traffic`: router-originated traffic must behave exactly\n"
+        "    // as if this hook were not attached.  Check it before anything else\n"
+        "    // (stale FORWARDED marks and HostDirect control-plane included) and\n"
+        "    // return TC_ACT_UNSPEC (TCX_NEXT) so the rest of the TC/TCX chain\n"
+        "    // still runs in its normal order (e.g. einat SNAT).\n"
         "    if (unlikely(skip_local_traffic && skb->ingress_ifindex == 0)) {\n"
         "        return TC_ACT_UNSPEC;\n"
         "    }\n"
         "\n"
-        "    if (likely(current_l3_offset > 0)) {\n",
+        "    // Already routed by a landscape pick_wan: enter the target link's\n"
+        "    // chain directly, the decision (and its chain id) travels in cb.\n"
+        "    if (tc_cb_forwarded(skb)) {\n",
     )
 
     #    26c) WAN route service modal: per-interface switch + hint.
@@ -3112,8 +3107,8 @@ def main() -> None:
         '    title: "Wan 路由转发服务",\n'
         '    skip_tc_xdp: "跳过本机流量",\n'
         "    skip_tc_xdp_hint:\n"
-        '      "开启后本机（路由器自身）的出向流量不再经过该 WAN 的 XDP/TC 路由链（不做策略路由、NAT 与封装），'
-        '转发流量不受影响；保存后自动重启生效。",\n'
+        '      "开启后本机（路由器自身）的出向流量按“未挂载”处理，完全绕过该 WAN 的 XDP/TC 路由链'
+        '（不做策略路由、NAT 与封装），转发流量不受影响；保存后自动重启生效。",\n'
         "  },\n",
     )
     patch(
@@ -3123,9 +3118,10 @@ def main() -> None:
         '    title: "WAN Route Forwarding Service",\n'
         '    skip_tc_xdp: "Skip Local Traffic",\n'
         "    skip_tc_xdp_hint:\n"
-        '      "Router-originated (local) egress traffic bypasses this WAN link\'s XDP/TC route chain '
-        '(no policy routing, NAT or encapsulation). Forwarded traffic is unaffected; the service '
-        'restarts automatically after saving.",\n'
+        '      "Router-originated (local) egress traffic is treated as if the WAN route hook were '
+        'not attached: it bypasses this WAN link\'s XDP/TC route chain entirely (no policy routing, '
+        'NAT or encapsulation). Forwarded traffic is unaffected; the service restarts '
+        'automatically after saving.",\n'
         "  },\n",
     )
 
